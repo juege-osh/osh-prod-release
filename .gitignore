@@ -1,0 +1,16 @@
+config.env
+data/
+web/node_modules/
+web/dist/
+static/dist/
+__pycache__/
+*.pyc
+.venv/
+.DS_Store
+
+# Documentation (do not commit)
+README.md
+项目说明文档.md
+使用说明.md
+架构设计.md
+*.md
