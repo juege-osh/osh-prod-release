@@ -1,4 +1,5 @@
 config.env
+secrets/
 data/
 web/node_modules/
 web/dist/
@@ -7,6 +8,12 @@ __pycache__/
 *.pyc
 .venv/
 .DS_Store
+
+# Go control plane (P1)
+bin/
+*.db
+analyzer-py/.venv/
+analyzer-py/__pycache__/
 
 # Documentation (do not commit)
 README.md

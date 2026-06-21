@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>部署到绿环境</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/app.css" />
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <div class="brand">
+        <div class="logo">G</div>
+        <div>
+          <h1>部署到绿环境</h1>
+          <p>149 预发槽位 · 端口 28080 · 不影响生产</p>
+        </div>
+      </div>
+      <div class="badges">
+        <span class="badge" id="modeBadge">—</span>
+        <span class="badge" id="ghaBadge">—</span>
+      </div>
+    </header>
+
+    <div class="guide-banner">
+      <span class="guide-icon">👉</span>
+      <div>
+        <strong>怎么操作？</strong>
+        看上方进度条当前在第几步 → 读下面说明 → <strong>只点一个绿色大按钮</strong> → 重复 4 次就部署完成。
+      </div>
+    </div>
+
+    <nav class="stepper" id="stepper" aria-label="部署步骤">
+      <div class="stepper-item" data-step="1"><span class="step-num">1</span><span class="step-text">创建</span></div>
+      <div class="stepper-arrow">→</div>
+      <div class="stepper-item" data-step="2"><span class="step-num">2</span><span class="step-text">提交评审</span></div>
+      <div class="stepper-arrow">→</div>
+      <div class="stepper-item" data-step="3"><span class="step-num">3</span><span class="step-text">审批通过</span></div>
+      <div class="stepper-arrow">→</div>
+      <div class="stepper-item" data-step="4"><span class="step-num">4</span><span class="step-text">部署绿环境</span></div>
+    </nav>
+
+    <main class="action-card card">
+      <div class="step-badge" id="stepBadge">第 1 步</div>
+      <h2 class="action-title" id="actionTitle">填写发布信息</h2>
+      <p class="action-desc" id="actionDesc">输入本次部署名称和你的名字。</p>
+
+      <div class="action-form" id="actionForm">
+        <label for="title">发布名称（必填）</label>
+        <input id="title" placeholder="例：20260708 功能上线" />
+        <label for="author">你的名字（必填）</label>
+        <input id="author" value="ops" placeholder="例：张三" />
+      </div>
+
+      <button class="btn-mega" id="mainBtn" type="button">
+        <span id="mainBtnText">下一步：创建发布单</span>
+        <span class="btn-arrow">→</span>
+      </button>
+
+      <div class="success-box" id="successBox" hidden>
+        <div class="success-icon">✓</div>
+        <h3>绿环境部署完成！</h3>
+        <p>请到绿环境验收页面是否正常。</p>
+        <a class="btn btn-secondary" id="greenLink" href="#" target="_blank" rel="noopener">打开绿环境验收 →</a>
+      </div>
+
+      <div class="waiting-box" id="waitingBox" hidden>
+        <div class="spinner-inline"></div>
+        <p id="waitingText">正在部署，请稍候…（约 2–5 分钟，页面会自动刷新）</p>
+      </div>
+    </main>
+
+    <details class="fold card" id="logFold">
+      <summary>查看部署日志</summary>
+      <ul class="steps" id="steps"></ul>
+    </details>
+
+    <details class="fold card">
+      <summary>历史发布单（可选，继续之前的任务）</summary>
+      <div class="release-list" id="list"><div class="empty">加载中…</div></div>
+    </details>
+
+    <footer class="env-footer">
+      <span>绿环境：<a id="footerGreenLink" href="#">—</a></span>
+      <span>后端分支：<code id="footerBackend">—</code></span>
+      <span>前端分支：<code id="footerFrontend">—</code></span>
+      <span id="footerTraffic">—</span>
+    </footer>
+  </div>
+
+  <div class="loading-overlay" id="loading"><div class="spinner"></div></div>
+  <div class="toast-wrap" id="toasts"></div>
+  <input type="hidden" id="developer" value="dev-a" />
+  <input type="hidden" id="rev1" value="rev-b" />
+  <input type="hidden" id="rev2" value="rev-c" />
+  <input type="hidden" id="impact" value="前后端代码更新，仅部署绿环境" />
+
+  <script src="/app.js"></script>
+</body>
+</html>

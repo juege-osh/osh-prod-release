@@ -1,0 +1,14 @@
+name: mysql
+kind: middleware
+data_dir: /opt/osh/002-data/osh-mysql
+config_dir: /opt/osh/003-config/osh/osh-mysql
+compose_fragment: compose/mysql.yml
+green_data_dir: /opt/osh-green/002-data/osh-mysql
+healthcheck:
+  type: tcp
+  target: "127.0.0.1:53306"
+backup:
+  cmd: "mysqldump ..."
+  restore: "mysql < dump.sql"
+migration_runner: mysql
+rollback: snapshot
