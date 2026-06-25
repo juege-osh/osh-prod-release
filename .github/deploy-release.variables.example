@@ -1,0 +1,9 @@
+# GitHub Repository Variables (Settings → Secrets and variables → Actions → Variables)
+
+HOST_149=149.88.92.159
+HOST_149_USER=root
+HOST_149_PORT=16328
+PLATFORM149_DEPLOY_DIR=/opt/osh-prod-release
+PLATFORM149_HEALTH_URL=http://127.0.0.1:8765/
+
+# Secrets: HOST_149_SSH_PRIVATE_KEY (149 SSH private key, ed25519 PEM)

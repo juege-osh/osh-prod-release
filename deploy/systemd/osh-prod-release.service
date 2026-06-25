@@ -1,0 +1,18 @@
+[Unit]
+Description=OSH Production Release Platform (Go)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/osh-prod-release
+Environment=CONFIG_PATH=/opt/osh-prod-release/config.env
+ExecStart=/opt/osh-prod-release/bin/osh-prod-release
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:/opt/osh-prod-release/logs/server.log
+StandardError=append:/opt/osh-prod-release/logs/server.log
+
+[Install]
+WantedBy=multi-user.target
