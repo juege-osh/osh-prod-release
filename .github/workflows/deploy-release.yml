@@ -1,5 +1,6 @@
-# 149 发布控制台自部署 — 仅更新 /opt/osh-prod-release，不触碰 /opt/osh、/opt/osh-green、/opt/osh-deploy-tools 等
+# 149 发布控制台自部署 — 仅更新 PLATFORM149_DEPLOY_DIR，不触碰其他 /opt 目录
 # 本文件仅存在于 main 分支；dev / dev_* 分支不得包含此 workflow（无自动部署）
+# 连接信息全部来自 GitHub Variables / Secrets，workflow 内不写明文 IP/端口/路径
 name: Deploy Platform to 149
 
 on:
@@ -14,27 +15,40 @@ concurrency:
 
 env:
   GO_VERSION: '1.22'
-  DEPLOY_HOST: ${{ vars.HOST_149 || '149.88.92.159' }}
-  DEPLOY_USER: ${{ vars.HOST_149_USER || 'root' }}
-  DEPLOY_PORT: ${{ vars.HOST_149_PORT || '16328' }}
-  # 硬编码默认值；Variables 可覆盖，但 remote 脚本会校验必须为 /opt/osh-prod-release
-  DEPLOY_DIR: ${{ vars.PLATFORM149_DEPLOY_DIR || '/opt/osh-prod-release' }}
+  DEPLOY_HOST: ${{ vars.HOST_149 }}
+  DEPLOY_USER: ${{ vars.HOST_149_USER }}
+  DEPLOY_PORT: ${{ vars.HOST_149_PORT }}
+  DEPLOY_DIR: ${{ vars.PLATFORM149_DEPLOY_DIR }}
+  HEALTH_URL: ${{ vars.PLATFORM149_HEALTH_URL }}
 
 jobs:
   deploy:
     name: Build and deploy osh-prod-release to 149
     runs-on: ubuntu-latest
-    # 双重保险：非 main 分支直接跳过（防止 workflow 被误合入 dev 后 push 触发）
     if: github.ref == 'refs/heads/main'
     steps:
       - name: Guard branch (main only)
         run: |
           test "${{ github.ref }}" = "refs/heads/main" || { echo "deploy-release only runs on main"; exit 1; }
 
-      - name: Guard deploy directory
+      - name: Validate required variables
         run: |
-          test "$DEPLOY_DIR" = "/opt/osh-prod-release" || {
-            echo "DEPLOY_DIR must be exactly /opt/osh-prod-release (got: $DEPLOY_DIR)"
+          missing=0
+          for name in DEPLOY_HOST DEPLOY_USER DEPLOY_PORT DEPLOY_DIR HEALTH_URL; do
+            eval "val=\$$name"
+            if [ -z "$val" ]; then
+              echo "::error::Repository variable for $name is required (see .github/deploy-release.variables.example)"
+              missing=1
+            fi
+          done
+          test "$missing" -eq 0
+
+      - name: Validate required secrets
+        env:
+          SSH_KEY: ${{ secrets.HOST_149_SSH_PRIVATE_KEY }}
+        run: |
+          test -n "$SSH_KEY" || {
+            echo "::error::Secret HOST_149_SSH_PRIVATE_KEY is required (Settings → Secrets → Actions)"
             exit 1
           }
 
@@ -66,7 +80,7 @@ jobs:
       - name: Setup SSH agent
         uses: webfactory/ssh-agent@v0.9.0
         with:
-          ssh-private-key: ${{ secrets.HOST_149_SSH_PRIVATE_KEY || secrets.GREEN149_SSH_PRIVATE_KEY || secrets.PROD_SSH_PRIVATE_KEY }}
+          ssh-private-key: ${{ secrets.HOST_149_SSH_PRIVATE_KEY }}
 
       - name: Add server to known_hosts
         run: |
@@ -97,7 +111,7 @@ jobs:
       - name: Health check
         run: |
           code="$(ssh -o ConnectTimeout=30 -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" \
-            "curl -s -o /dev/null -w '%{http_code}' --max-time 15 http://127.0.0.1:8765/ || echo 000")"
+            "curl -s -o /dev/null -w '%{http_code}' --max-time 15 '${HEALTH_URL}' || echo 000")"
           if [ "$code" != "200" ] && [ "$code" != "401" ] && [ "$code" != "302" ]; then
             echo "health check failed: HTTP $code (expected 200/401/302)"
             exit 1
