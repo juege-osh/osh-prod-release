@@ -81,6 +81,17 @@ func (s *Store) ListDeploySnapshots(ctx context.Context, target string, limit in
 	return out, rows.Err()
 }
 
+func (s *Store) GetLatestDeploySnapshot(ctx context.Context, target string) (*models.DeploySnapshot, error) {
+	list, err := s.ListDeploySnapshots(ctx, target, 1)
+	if err != nil {
+		return nil, err
+	}
+	if len(list) == 0 {
+		return nil, fmt.Errorf("没有已记录的部署版本")
+	}
+	return &list[0], nil
+}
+
 func (s *Store) GetPreviousDeploySnapshot(ctx context.Context, target string) (*models.DeploySnapshot, error) {
 	list, err := s.ListDeploySnapshots(ctx, target, 2)
 	if err != nil {

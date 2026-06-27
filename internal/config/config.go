@@ -23,6 +23,7 @@ type Config struct {
 	GreenCodeSyncScript   string
 	BlueCodeSyncScript    string
 	StandbySyncScript   string
+	SlotPostDeployScript string
 	GitHubRepo            string
 	GitHubBackendRepo          string
 	GitHubFrontendRepo         string
@@ -68,6 +69,7 @@ func Load(path string) (*Config, error) {
 		GreenCodeSyncScript: "/opt/osh-deploy-tools/osh-green-code-sync.sh",
 		BlueCodeSyncScript:  "/opt/osh-deploy-tools/osh-prod-code-sync.sh",
 		StandbySyncScript:   "/opt/osh-green/005-scripts/osh-prod-standby-sync.sh",
+		SlotPostDeployScript: "/opt/osh-green/005-scripts/osh-slot-postdeploy.sh",
 		AnalyzerURL:         "http://127.0.0.1:8766",
 		BossReviewer:        "juege",
 		SuperAdminUser:      "juege",
@@ -159,6 +161,9 @@ func Load(path string) (*Config, error) {
 	}
 	if v := kv["STANDBY_SYNC_SCRIPT"]; v != "" {
 		c.StandbySyncScript = v
+	}
+	if v := kv["SLOT_POSTDEPLOY_SCRIPT"]; v != "" {
+		c.SlotPostDeployScript = v
 	}
 	c.GitHubRepo = kv["GITHUB_REPO"]
 	c.GitHubBackendRepo = kv["GITHUB_BACKEND_REPO"]

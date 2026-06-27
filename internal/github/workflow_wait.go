@@ -16,6 +16,8 @@ type workflowRun struct {
 	Conclusion string
 	HTMLURL    string
 	CreatedAt  time.Time
+	HeadBranch string
+	Event      string
 }
 
 type workflowRunsResponse struct {
@@ -26,15 +28,14 @@ type workflowRunsResponse struct {
 		HTMLURL    string  `json:"html_url"`
 		CreatedAt  string  `json:"created_at"`
 		Event      string  `json:"event"`
+		HeadBranch string  `json:"head_branch"`
 	} `json:"workflow_runs"`
 }
 
-// WaitGreenWorkflows blocks until backend + frontend deploy-149.yml runs succeed.
 func (d *DeployTrigger) WaitGreenWorkflows(ctx context.Context, since time.Time, maxWait time.Duration) (string, error) {
 	return d.WaitSlotWorkflows(ctx, since, maxWait)
 }
 
-// WaitSlotWorkflows waits for latest workflow_dispatch runs after since (any slot).
 func (d *DeployTrigger) WaitSlotWorkflows(ctx context.Context, since time.Time, maxWait time.Duration) (string, error) {
 	return d.waitRepoWorkflows(ctx, since, maxWait)
 }
@@ -56,20 +57,17 @@ func (d *DeployTrigger) waitRepoWorkflowsForTargets(ctx context.Context, targets
 		return "", fmt.Errorf("GITHUB_TOKEN not configured")
 	}
 	deadline := time.Now().Add(maxWait)
-	pending := make(map[string]bool, len(targets))
+	pending := make(map[string]repoTarget, len(targets))
 	for _, t := range targets {
-		pending[t.repo] = true
+		pending[t.repo] = t
 	}
 
 	var done []string
 	poll := 10 * time.Second
 
 	for time.Now().Before(deadline) {
-		for _, t := range targets {
-			if !pending[t.repo] {
-				continue
-			}
-			run, err := d.fetchLatestDispatchRun(ctx, t.repo, since)
+		for repo, t := range pending {
+			run, err := d.fetchLatestDeployRun(ctx, t.repo, t.gitRef, since)
 			if err != nil {
 				return "", err
 			}
@@ -85,12 +83,10 @@ func (d *DeployTrigger) waitRepoWorkflowsForTargets(ctx context.Context, targets
 					}
 					return "", fmt.Errorf("%s workflow 未成功（%s） %s", t.repo, c, run.HTMLURL)
 				}
-				delete(pending, t.repo)
-				done = append(done, fmt.Sprintf("%s run#%d ok", t.repo, run.ID))
+				delete(pending, repo)
+				done = append(done, fmt.Sprintf("%s run#%d ok (%s)", t.repo, run.ID, run.HeadBranch))
 			case "queued", "in_progress", "waiting", "requested", "pending":
-				// keep waiting
 			default:
-				// unknown status, keep waiting
 			}
 		}
 		if len(pending) == 0 {
@@ -104,20 +100,24 @@ func (d *DeployTrigger) waitRepoWorkflowsForTargets(ctx context.Context, targets
 	}
 
 	var waiting []string
-	for repo := range pending {
-		waiting = append(waiting, repo)
+	for repo, t := range pending {
+		waiting = append(waiting, fmt.Sprintf("%s@%s", repo, t.gitRef))
 	}
 	return "", fmt.Errorf("等待 GitHub Actions 超时（%s），仍在进行: %s", maxWait, strings.Join(waiting, ", "))
 }
 
-func (d *DeployTrigger) fetchLatestDispatchRun(ctx context.Context, repo string, since time.Time) (*workflowRun, error) {
+func (d *DeployTrigger) fetchLatestDeployRun(ctx context.Context, repo, gitRef string, since time.Time) (*workflowRun, error) {
+	return d.fetchLatestRunByEvent(ctx, repo, "workflow_dispatch", since, gitRef)
+}
+
+func (d *DeployTrigger) fetchLatestRunByEvent(ctx context.Context, repo, event string, since time.Time, gitRef string) (*workflowRun, error) {
 	parts := strings.SplitN(repo, "/", 2)
 	if len(parts) != 2 {
 		return nil, fmt.Errorf("invalid repo %q", repo)
 	}
 	url := fmt.Sprintf(
-		"https://api.github.com/repos/%s/%s/actions/workflows/%s/runs?event=workflow_dispatch&per_page=15",
-		parts[0], parts[1], slotWorkflowFile,
+		"https://api.github.com/repos/%s/%s/actions/runs?event=%s&per_page=15",
+		parts[0], parts[1], event,
 	)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -145,7 +145,7 @@ func (d *DeployTrigger) fetchLatestDispatchRun(ctx context.Context, repo string,
 
 	var best *workflowRun
 	for _, wr := range body.WorkflowRuns {
-		if wr.Event != "workflow_dispatch" {
+		if wr.Event != event {
 			continue
 		}
 		created, err := time.Parse(time.RFC3339, wr.CreatedAt)
@@ -155,6 +155,9 @@ func (d *DeployTrigger) fetchLatestDispatchRun(ctx context.Context, repo string,
 		if created.Before(since) {
 			continue
 		}
+		if gitRef != "" && wr.HeadBranch != "" && wr.HeadBranch != gitRef {
+			continue
+		}
 		conclusion := ""
 		if wr.Conclusion != nil {
 			conclusion = *wr.Conclusion
@@ -162,6 +165,7 @@ func (d *DeployTrigger) fetchLatestDispatchRun(ctx context.Context, repo string,
 		candidate := &workflowRun{
 			ID: wr.ID, Status: wr.Status, Conclusion: conclusion,
 			HTMLURL: wr.HTMLURL, CreatedAt: created,
+			HeadBranch: wr.HeadBranch, Event: wr.Event,
 		}
 		if best == nil || candidate.CreatedAt.After(best.CreatedAt) {
 			best = candidate

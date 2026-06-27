@@ -13,7 +13,7 @@ import (
 	"github.com/juege/osh-prod-release/internal/config"
 )
 
-const slotWorkflowFile = "deploy-149.yml"
+const slotWorkflowFile = "deploy-prod.yml"
 
 // DeployTrigger dispatches approval-gated 149 deploy workflows (green or blue slot).
 type DeployTrigger struct {
@@ -53,12 +53,11 @@ func (d *DeployTrigger) backendTarget(overrideGitRef string) (repoTarget, error)
 	if repo == "" {
 		return repoTarget{}, fmt.Errorf("GITHUB_BACKEND_REPO not configured")
 	}
-	gitRef := firstNonEmpty(overrideGitRef, d.cfg.GitHubBackendGitRef, d.cfg.GitHubBackendDispatchRef, d.cfg.GitHubDispatchRef)
-	dispatchRef := firstNonEmpty(d.cfg.GitHubBackendDispatchRef, gitRef, d.cfg.GitHubDispatchRef)
-	if gitRef == "" || dispatchRef == "" {
-		return repoTarget{}, fmt.Errorf("backend git ref not configured (set GITHUB_BACKEND_GIT_REF or GITHUB_BACKEND_DISPATCH_REF)")
+	gitRef := firstNonEmpty(overrideGitRef, d.cfg.GitHubBackendGitRef, d.cfg.GitHubDispatchRef)
+	if gitRef == "" {
+		return repoTarget{}, fmt.Errorf("backend git ref not configured (set GITHUB_BACKEND_GIT_REF)")
 	}
-	return repoTarget{repo: repo, dispatchRef: dispatchRef, gitRef: gitRef}, nil
+	return repoTarget{repo: repo, dispatchRef: gitRef, gitRef: gitRef}, nil
 }
 
 func (d *DeployTrigger) frontendTarget(overrideGitRef string) (repoTarget, error) {
@@ -66,16 +65,13 @@ func (d *DeployTrigger) frontendTarget(overrideGitRef string) (repoTarget, error
 	if repo == "" {
 		return repoTarget{}, fmt.Errorf("GITHUB_FRONTEND_REPO not configured")
 	}
-	gitRef := firstNonEmpty(overrideGitRef, d.cfg.GitHubFrontendGitRef, d.cfg.GitHubFrontendDispatchRef, d.cfg.GitHubDispatchRef)
-	dispatchRef := firstNonEmpty(d.cfg.GitHubFrontendDispatchRef, gitRef, d.cfg.GitHubDispatchRef)
-	if gitRef == "" || dispatchRef == "" {
-		return repoTarget{}, fmt.Errorf("frontend git ref not configured (set GITHUB_FRONTEND_GIT_REF or GITHUB_FRONTEND_DISPATCH_REF)")
+	gitRef := firstNonEmpty(overrideGitRef, d.cfg.GitHubFrontendGitRef, d.cfg.GitHubDispatchRef)
+	if gitRef == "" {
+		return repoTarget{}, fmt.Errorf("frontend git ref not configured (set GITHUB_FRONTEND_GIT_REF)")
 	}
-	return repoTarget{repo: repo, dispatchRef: dispatchRef, gitRef: gitRef}, nil
+	return repoTarget{repo: repo, dispatchRef: gitRef, gitRef: gitRef}, nil
 }
 
-// TriggerSlot149 starts backend + frontend deploy-149.yml for green or blue.
-// Pass empty override refs to use config.env per-repo branch names.
 func (d *DeployTrigger) TriggerSlot149(ctx context.Context, backendGitRef, frontendGitRef, releaseID, slot string) (string, error) {
 	slot = strings.ToLower(strings.TrimSpace(slot))
 	if slot != "green" && slot != "blue" {
@@ -97,19 +93,18 @@ func (d *DeployTrigger) TriggerSlot149(ctx context.Context, backendGitRef, front
 	targets := []repoTarget{backend, frontend}
 	var results []dispatchResult
 	for _, t := range targets {
-		if err := d.dispatchWorkflow(ctx, t.repo, slotWorkflowFile, t.dispatchRef, t.gitRef, releaseID, slot); err != nil {
-			return "", fmt.Errorf("%s: %w", t.repo, err)
+		if err := d.dispatchWorkflow(ctx, t.repo, slotWorkflowFile, t.gitRef, t.gitRef, releaseID, slot); err != nil {
+			return "", fmt.Errorf("%s: 触发 deploy-prod@%s 失败: %w", t.repo, t.gitRef, err)
 		}
 		results = append(results, dispatchResult{
 			Repo: t.repo, Workflow: slotWorkflowFile,
-			DispatchRef: t.dispatchRef, GitRef: t.gitRef, Slot: slot,
+			DispatchRef: t.gitRef, GitRef: t.gitRef, Slot: slot,
 		})
 	}
 	b, _ := json.Marshal(results)
 	return string(b), nil
 }
 
-// TriggerGreen149 is an alias for TriggerSlot149(..., "green").
 func (d *DeployTrigger) TriggerGreen149(ctx context.Context, backendGitRef, frontendGitRef, releaseID string) (string, error) {
 	return d.TriggerSlot149(ctx, backendGitRef, frontendGitRef, releaseID, "green")
 }

@@ -71,6 +71,15 @@ func (c *Client) DeployBlueCode(ctx context.Context) (string, error) {
 	return c.Run(ctx, fmt.Sprintf("bash %s all", script), 30*time.Minute)
 }
 
+// SlotPostDeploy patches jar/Nacos/frontend on 149 and restarts backend after GHA uploaded code.
+func (c *Client) SlotPostDeploy(ctx context.Context, slot string) (string, error) {
+	script := c.cfg.SlotPostDeployScript
+	if script == "" {
+		script = "/opt/osh-green/005-scripts/osh-slot-postdeploy.sh"
+	}
+	return c.Run(ctx, fmt.Sprintf("bash %s %s all", script, slot), 12*time.Minute)
+}
+
 func (c *Client) TrafficStatus(ctx context.Context) (string, error) {
 	script := c.cfg.TrafficSwitchScript
 	return c.Run(ctx, fmt.Sprintf("bash %s status", script), 30*time.Second)
