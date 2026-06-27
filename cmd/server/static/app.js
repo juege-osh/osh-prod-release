@@ -397,23 +397,26 @@
 
   function initSidebar() {
     const layout = $('appLayout');
+    if (!layout) return;
     if (localStorage.getItem('osh_sidebar_collapsed') === '1') {
       layout.classList.add('collapsed');
     }
 
-    $('sidebarToggle').addEventListener('click', () => {
+    $('sidebarToggle')?.addEventListener('click', () => {
       layout.classList.toggle('collapsed');
       localStorage.setItem('osh_sidebar_collapsed', layout.classList.contains('collapsed') ? '1' : '0');
     });
 
-    $('mobileMenuBtn').addEventListener('click', () => {
+    $('mobileMenuBtn')?.addEventListener('click', () => {
       layout.classList.toggle('mobile-open');
-      $('sidebarBackdrop').hidden = !layout.classList.contains('mobile-open');
+      const backdrop = $('sidebarBackdrop');
+      if (backdrop) backdrop.hidden = !layout.classList.contains('mobile-open');
     });
 
-    $('sidebarBackdrop').addEventListener('click', () => {
+    $('sidebarBackdrop')?.addEventListener('click', () => {
       layout.classList.remove('mobile-open');
-      $('sidebarBackdrop').hidden = true;
+      const backdrop = $('sidebarBackdrop');
+      if (backdrop) backdrop.hidden = true;
     });
 
     document.querySelectorAll('.nav-item').forEach((btn) => {
@@ -1893,11 +1896,18 @@
   }
 
   async function boot() {
-    initSidebar();
-    initPageFromHash();
+    // Login handlers first — must work even if sidebar/DOM init fails (e.g. cached old HTML)
     $('btnLogin')?.addEventListener('click', login);
     $('loginPass')?.addEventListener('keydown', (e) => { if (e.key === 'Enter') login(); });
     $('btnLogout')?.addEventListener('click', logout);
+
+    try {
+      initSidebar();
+      initPageFromHash();
+    } catch (err) {
+      console.error('initSidebar/initPageFromHash failed', err);
+    }
+
     $('btnRollbackGreen')?.addEventListener('click', () => rollbackDeploy('green'));
     $('btnRollbackBlue')?.addEventListener('click', () => rollbackDeploy('blue'));
     $('btnCancelDeploy')?.addEventListener('click', () => cancelDeployRelease(state.current));

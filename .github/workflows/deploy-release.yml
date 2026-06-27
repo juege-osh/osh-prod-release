@@ -1,0 +1,119 @@
+# 149 发布控制台自部署 — 仅更新 PLATFORM149_DEPLOY_DIR，不触碰其他 /opt 目录
+# 本文件仅存在于 main 分支；dev / dev_* 分支不得包含此 workflow（无自动部署）
+# 连接信息全部来自 GitHub Variables / Secrets，workflow 内不写明文 IP/端口/路径
+name: Deploy Platform to 149
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-platform-release
+  cancel-in-progress: false
+
+env:
+  GO_VERSION: '1.22'
+  DEPLOY_HOST: ${{ vars.HOST_149 }}
+  DEPLOY_USER: ${{ vars.HOST_149_USER }}
+  DEPLOY_PORT: ${{ vars.HOST_149_PORT }}
+  DEPLOY_DIR: ${{ vars.PLATFORM149_DEPLOY_DIR }}
+  HEALTH_URL: ${{ vars.PLATFORM149_HEALTH_URL }}
+
+jobs:
+  deploy:
+    name: Build and deploy osh-prod-release to 149
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Guard branch (main only)
+        run: |
+          test "${{ github.ref }}" = "refs/heads/main" || { echo "deploy-release only runs on main"; exit 1; }
+
+      - name: Validate required variables
+        run: |
+          missing=0
+          for name in DEPLOY_HOST DEPLOY_USER DEPLOY_PORT DEPLOY_DIR HEALTH_URL; do
+            eval "val=\$$name"
+            if [ -z "$val" ]; then
+              echo "::error::Repository variable for $name is required (see .github/deploy-release.variables.example)"
+              missing=1
+            fi
+          done
+          test "$missing" -eq 0
+
+      - name: Validate required secrets
+        env:
+          SSH_KEY: ${{ secrets.HOST_149_SSH_PRIVATE_KEY }}
+        run: |
+          test -n "$SSH_KEY" || {
+            echo "::error::Secret HOST_149_SSH_PRIVATE_KEY is required (Settings → Secrets → Actions)"
+            exit 1
+          }
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: go.sum
+
+      - name: Build linux binary
+        run: |
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags="-s -w" -o dist/osh-prod-release ./cmd/server
+          test -f dist/osh-prod-release
+
+      - name: Prepare deploy bundle
+        run: |
+          mkdir -p dist-bundle/bin dist-bundle/migrations dist-bundle/components dist-bundle/deploy/systemd
+          cp dist/osh-prod-release dist-bundle/bin/osh-prod-release
+          cp -r migrations/. dist-bundle/migrations/
+          cp -r components/. dist-bundle/components/
+          cp deploy/systemd/osh-prod-release.service dist-bundle/deploy/systemd/
+          cp config.env.149.example dist-bundle/config.env.149.example
+          cp scripts/deploy-149-remote.sh dist-bundle/deploy-149-remote.sh
+          chmod +x dist-bundle/deploy-149-remote.sh dist-bundle/bin/osh-prod-release
+
+      - name: Setup SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.HOST_149_SSH_PRIVATE_KEY }}
+
+      - name: Add server to known_hosts
+        run: |
+          mkdir -p ~/.ssh
+          for i in 1 2 3; do
+            ssh-keyscan -p "$DEPLOY_PORT" -T 15 "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null && break
+            sleep 3
+          done
+          test -s ~/.ssh/known_hosts
+
+      - name: Ensure remote directory exists (osh-prod-release only)
+        run: |
+          ssh -o ConnectTimeout=30 -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" \
+            "mkdir -p '$DEPLOY_DIR/bin' '$DEPLOY_DIR/data' '$DEPLOY_DIR/logs'"
+
+      - name: Upload bundle (scoped to DEPLOY_DIR)
+        run: |
+          rsync -az \
+            -e "ssh -o ConnectTimeout=30 -p $DEPLOY_PORT" \
+            dist-bundle/ \
+            "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_DIR/.deploy-staging/"
+
+      - name: Install and restart (remote script enforces path guard)
+        run: |
+          ssh -o ConnectTimeout=30 -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" \
+            "DEPLOY_DIR='$DEPLOY_DIR' bash '$DEPLOY_DIR/.deploy-staging/deploy-149-remote.sh'"
+
+      - name: Health check
+        run: |
+          code="$(ssh -o ConnectTimeout=30 -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" \
+            "curl -s -o /dev/null -w '%{http_code}' --max-time 15 '${HEALTH_URL}' || echo 000")"
+          if [ "$code" != "200" ] && [ "$code" != "401" ] && [ "$code" != "302" ]; then
+            echo "health check failed: HTTP $code (expected 200/401/302)"
+            exit 1
+          fi
+          echo "health check OK: HTTP $code"
