@@ -103,6 +103,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/releases/{id}/submit-review", h.submitReview)
 	mux.HandleFunc("POST /api/releases/{id}/boss-approve", h.bossApprove)
 	mux.HandleFunc("POST /api/releases/{id}/deploy", h.deploy)
+	mux.HandleFunc("POST /api/releases/{id}/cancel-deploy", h.cancelDeploy)
 	mux.HandleFunc("POST /api/releases/{id}/switch", h.switchTraffic)
 	mux.HandleFunc("POST /api/releases/{id}/verify", h.manualVerify)
 	mux.HandleFunc("POST /api/releases/{id}/rollback", h.rollback)
@@ -276,6 +277,25 @@ func (h *Handler) deploy(w http.ResponseWriter, r *http.Request) {
 		req.Actor = user.Username
 	}
 	rel, err := h.release.StartDeploy(r.Context(), id, req.Actor, user.IsAdmin)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, rel)
+}
+
+func (h *Handler) cancelDeploy(w http.ResponseWriter, r *http.Request) {
+	user, ok := h.requireUser(w, r)
+	if !ok {
+		return
+	}
+	id := r.PathValue("id")
+	var req models.ActionRequest
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	if req.Actor == "" {
+		req.Actor = user.Username
+	}
+	rel, err := h.release.CancelDeploy(r.Context(), id, req.Actor)
 	if err != nil {
 		writeErr(w, err)
 		return

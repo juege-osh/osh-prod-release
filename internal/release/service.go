@@ -2,6 +2,7 @@ package release
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"strings"
@@ -28,6 +29,7 @@ type Service struct {
 	deployGH *github.DeployTrigger
 	traffic  *traffic.Service
 	mu       sync.Mutex
+	jobs     deployJobRegistry
 }
 
 func New(cfg *config.Config, st *store.Store, trafficSvc *traffic.Service) *Service {
@@ -215,12 +217,122 @@ func (s *Service) StartDeploy(ctx context.Context, id, actor string, adminBypass
 	_ = s.store.UpdateReleaseStatus(ctx, id, models.StatusDeploying)
 	_ = s.store.UpdateStep(ctx, id, "deploy_standby", "running", deployMsg)
 
-	go s.executeDeploy(id, actor)
+	deployCtx, cancel := context.WithCancel(context.Background())
+	job := &deployJob{
+		releaseID: id,
+		target:    target,
+		cancel:    cancel,
+	}
+	s.jobs.set(job)
+
+	go s.executeDeploy(deployCtx, id, actor)
 	return s.store.GetRelease(ctx, id)
 }
 
-func (s *Service) executeDeploy(id, actor string) {
+func (s *Service) CancelDeploy(ctx context.Context, id, actor string) (*models.Release, error) {
+	rel, err := s.store.GetRelease(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if rel.Status != models.StatusDeploying && rel.Status != models.StatusTesting {
+		return nil, fmt.Errorf("当前发布单不在部署中，无法终止")
+	}
+
+	job, ok := s.jobs.stop(id)
+	dispatchSince := time.Now().UTC().Add(-30 * time.Minute)
+	target := rel.DeployTarget
+	if target == "" {
+		target = "green"
+	}
+	if ok && job != nil {
+		if !job.dispatchSince.IsZero() {
+			dispatchSince = job.dispatchSince
+		}
+		if job.target != "" {
+			target = job.target
+		}
+	}
+
+	_ = s.store.UpdateStep(ctx, id, "deploy_standby", "running", "正在终止部署并回滚到部署前版本…")
+	if rel.Status == models.StatusTesting {
+		_ = s.store.UpdateStep(ctx, id, "auto_test", "pending", "已终止")
+	}
+
+	go s.finishCancelDeploy(id, actor, target, dispatchSince)
+	return s.store.GetRelease(ctx, id)
+}
+
+func (s *Service) finishCancelDeploy(id, actor, target string, dispatchSince time.Time) {
 	ctx := context.Background()
+	var detail []string
+
+	if out, err := s.deployGH.CancelActiveWorkflows(ctx, dispatchSince); err != nil {
+		detail = append(detail, "cancel GHA: "+err.Error())
+	} else {
+		detail = append(detail, out)
+	}
+
+	revertOut, revertErr := s.revertToLatestSnapshot(ctx, target, id, actor)
+	if revertErr != nil {
+		detail = append(detail, "revert: "+revertErr.Error())
+	} else if revertOut != "" {
+		detail = append(detail, revertOut)
+	}
+
+	msg := "部署已终止，已恢复部署前版本，可重新点击部署"
+	if revertErr != nil {
+		msg = "部署已终止（自动回滚失败: " + revertErr.Error() + "，请手动检查环境），可重新点击部署"
+	}
+
+	_ = s.store.UpdateStep(ctx, id, "deploy_standby", "pending", msg)
+	_ = s.store.UpdateStep(ctx, id, "auto_test", "pending", "")
+	_ = s.store.UpdateReleaseStatus(ctx, id, models.StatusApproved)
+	_ = s.store.AddAudit(ctx, actor, "deploy_cancel", id, strings.Join(detail, "; "))
+	s.jobs.clear(id)
+	s.jobs.clearCancelled(id)
+}
+
+func (s *Service) revertToLatestSnapshot(ctx context.Context, target, releaseID, actor string) (string, error) {
+	snap, err := s.store.GetLatestDeploySnapshot(ctx, target)
+	if err != nil {
+		return "", err
+	}
+
+	backendRef := snap.BackendGitRef
+	frontendRef := snap.FrontendGitRef
+	if backendRef == "" {
+		backendRef = s.cfg.GitHubBackendGitRef
+	}
+	if frontendRef == "" {
+		frontendRef = s.cfg.GitHubFrontendGitRef
+	}
+
+	dispatchSince := time.Now().UTC().Add(-15 * time.Second)
+	out, errDeploy := s.deployGH.TriggerSlot149(ctx, backendRef, frontendRef, "revert-"+releaseID, target)
+	if errDeploy != nil {
+		return "", errDeploy
+	}
+	ghaOut, waitErr := s.deployGH.WaitSlotWorkflows(ctx, dispatchSince, 30*time.Minute)
+	if waitErr != nil {
+		return "", waitErr
+	}
+	port := "28080"
+	if target == "blue" {
+		port = "58080"
+	}
+	waitOut, waitErr := s.ssh.WaitSlotAPI(ctx, target, port, 5*time.Minute)
+	if waitErr != nil {
+		return "", waitErr
+	}
+	return out + "; GHA: " + ghaOut + "; " + waitOut, nil
+}
+
+func (s *Service) deployWasCancelled(id string) bool {
+	return s.jobs.isCancelled(id)
+}
+
+func (s *Service) executeDeploy(ctx context.Context, id, actor string) {
+	defer s.jobs.clear(id)
 
 	rel, err := s.store.GetRelease(ctx, id)
 	if err != nil {
@@ -232,6 +344,9 @@ func (s *Service) executeDeploy(id, actor string) {
 	}
 	if target == "blue" && s.traffic != nil {
 		if err := s.traffic.RequireProductionGreen(ctx); err != nil {
+			if s.deployWasCancelled(id) {
+				return
+			}
 			_ = s.store.UpdateStep(ctx, id, "deploy_standby", "failed", err.Error())
 			_ = s.store.UpdateReleaseStatus(ctx, id, models.StatusFailed)
 			return
@@ -245,6 +360,9 @@ func (s *Service) executeDeploy(id, actor string) {
 	} else {
 		out, errDeploy = s.executeGreenDeploy(ctx, id)
 	}
+	if s.deployWasCancelled(id) || errors.Is(errDeploy, context.Canceled) {
+		return
+	}
 	if errDeploy != nil {
 		_ = s.store.UpdateStep(ctx, id, "deploy_standby", "failed", errDeploy.Error())
 		_ = s.store.UpdateReleaseStatus(ctx, id, models.StatusFailed)
@@ -252,6 +370,10 @@ func (s *Service) executeDeploy(id, actor string) {
 	}
 	_ = s.store.UpdateStep(ctx, id, "deploy_standby", "success", out)
 	_ = s.store.AddAudit(ctx, actor, "deploy_standby", id, out)
+
+	if s.deployWasCancelled(id) {
+		return
+	}
 
 	env := "green"
 	if target == "blue" {
@@ -265,6 +387,7 @@ func (s *Service) executeGreenDeploy(ctx context.Context, id string) (string, er
 	var errDeploy error
 	if s.cfg.GitHubToken != "" && (s.cfg.GitHubBackendRepo != "" || s.cfg.GitHubFrontendRepo != "") {
 		dispatchSince := time.Now().UTC().Add(-15 * time.Second)
+		s.jobs.markDispatchSince(id, dispatchSince)
 		out, errDeploy = s.deployGH.TriggerGreen149(ctx, "", "", id)
 		if errDeploy == nil {
 			_ = s.store.UpdateStep(ctx, id, "deploy_standby", "running", "GHA 已触发，等待前后端 workflow 跑完（约 3–8 分钟）…")
@@ -273,12 +396,19 @@ func (s *Service) executeGreenDeploy(ctx context.Context, id string) (string, er
 				errDeploy = waitErr
 			} else {
 				out = out + "; GHA: " + ghaOut
-				_ = s.store.UpdateStep(ctx, id, "deploy_standby", "running", "GHA 已完成，验证绿环境 HTTP…")
-				waitOut, waitErr := s.ssh.WaitGreenAPI(ctx, "28080", 3*time.Minute)
-				if waitErr != nil {
-					errDeploy = waitErr
+				_ = s.store.UpdateStep(ctx, id, "deploy_standby", "running", "GHA 已完成，149 上 patch 端口/Nacos 并重启…")
+				postOut, postErr := s.ssh.SlotPostDeploy(ctx, "green")
+				if postErr != nil {
+					errDeploy = postErr
 				} else {
-					out = out + "; " + waitOut
+					out = out + "; postdeploy: " + postOut
+					_ = s.store.UpdateStep(ctx, id, "deploy_standby", "running", "postdeploy 完成，验证绿环境 HTTP…")
+					waitOut, waitErr := s.ssh.WaitGreenAPI(ctx, "28080", 3*time.Minute)
+					if waitErr != nil {
+						errDeploy = waitErr
+					} else {
+						out = out + "; " + waitOut
+					}
 				}
 			}
 		}
@@ -293,6 +423,7 @@ func (s *Service) executeBlueDeploy(ctx context.Context, id string) (string, err
 	var errDeploy error
 	if s.cfg.GitHubToken != "" && (s.cfg.GitHubBackendRepo != "" || s.cfg.GitHubFrontendRepo != "") {
 		dispatchSince := time.Now().UTC().Add(-15 * time.Second)
+		s.jobs.markDispatchSince(id, dispatchSince)
 		out, errDeploy = s.deployGH.TriggerSlot149(ctx, "", "", id, "blue")
 		if errDeploy == nil {
 			_ = s.store.UpdateStep(ctx, id, "deploy_standby", "running", "GHA 已触发，等待前后端 workflow 跑完（约 3–8 分钟）…")
@@ -301,12 +432,19 @@ func (s *Service) executeBlueDeploy(ctx context.Context, id string) (string, err
 				errDeploy = waitErr
 			} else {
 				out = out + "; GHA: " + ghaOut
-				_ = s.store.UpdateStep(ctx, id, "deploy_standby", "running", "GHA 已完成，验证蓝环境 :58080…")
-				waitOut, waitErr := s.ssh.WaitSlotAPI(ctx, "blue", "58080", 5*time.Minute)
-				if waitErr != nil {
-					errDeploy = waitErr
+				_ = s.store.UpdateStep(ctx, id, "deploy_standby", "running", "GHA 已完成，149 上 patch 端口/Nacos 并重启…")
+				postOut, postErr := s.ssh.SlotPostDeploy(ctx, "blue")
+				if postErr != nil {
+					errDeploy = postErr
 				} else {
-					out = out + "; " + waitOut
+					out = out + "; postdeploy: " + postOut
+					_ = s.store.UpdateStep(ctx, id, "deploy_standby", "running", "postdeploy 完成，验证蓝环境 :58080…")
+					waitOut, waitErr := s.ssh.WaitSlotAPI(ctx, "blue", "58080", 5*time.Minute)
+					if waitErr != nil {
+						errDeploy = waitErr
+					} else {
+						out = out + "; " + waitOut
+					}
 				}
 			}
 		}
@@ -317,6 +455,9 @@ func (s *Service) executeBlueDeploy(ctx context.Context, id string) (string, err
 }
 
 func (s *Service) runAutoTest(ctx context.Context, id, actor, env, target string) (*models.Release, error) {
+	if s.deployWasCancelled(id) {
+		return nil, context.Canceled
+	}
 	_ = s.store.UpdateReleaseStatus(ctx, id, models.StatusTesting)
 	_ = s.store.UpdateStep(ctx, id, "auto_test", "running", "")
 
@@ -325,12 +466,18 @@ func (s *Service) runAutoTest(ctx context.Context, id, actor, env, target string
 		return nil, err
 	}
 	report, err := s.test.Run(ctx, *rel, env)
+	if s.deployWasCancelled(id) {
+		return nil, context.Canceled
+	}
 	if err != nil {
 		_ = s.store.UpdateStep(ctx, id, "auto_test", "failed", err.Error())
 		_ = s.store.UpdateReleaseStatus(ctx, id, models.StatusFailed)
 		return nil, err
 	}
 	_ = s.store.SaveTestReport(ctx, *report)
+	if s.deployWasCancelled(id) {
+		return nil, context.Canceled
+	}
 	if !report.Passed {
 		_ = s.store.UpdateStep(ctx, id, "auto_test", "failed", report.AIVerdict)
 		_ = s.store.UpdateReleaseStatus(ctx, id, models.StatusFailed)
@@ -338,6 +485,9 @@ func (s *Service) runAutoTest(ctx context.Context, id, actor, env, target string
 	}
 	_ = s.store.UpdateStep(ctx, id, "auto_test", "success", report.AIVerdict)
 	_ = s.store.AddAudit(ctx, actor, "auto_test_pass", id, report.AIVerdict)
+	if s.deployWasCancelled(id) {
+		return nil, context.Canceled
+	}
 	if target == "blue" {
 		return s.finishBlueDeploy(ctx, id, actor, report.AIVerdict)
 	}

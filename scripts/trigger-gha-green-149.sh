@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 触发 deploy-149.yml；前后端可使用不同分支（如 release/* vs prod/*）
+# 触发 deploy-prod.yml；前后端可使用不同分支（如 release/* vs prod/*）
 set -euo pipefail
 
 SLOT="${SLOT:-green}"
@@ -25,7 +25,7 @@ usage() {
 
 默认分支（GitHub 上当前可用）:
   backend  release/20260708
-  frontend prod/20260708
+  frontend release/20260708
 EOF
 }
 
@@ -68,7 +68,7 @@ fi
 
 # 默认值：命令行未指定时才读 GITHUB_* 环境变量
 BACKEND_REF="${BACKEND_REF:-${GITHUB_BACKEND_GIT_REF:-release/20260708}}"
-FRONTEND_REF="${FRONTEND_REF:-${GITHUB_FRONTEND_GIT_REF:-prod/20260708}}"
+FRONTEND_REF="${FRONTEND_REF:-${GITHUB_FRONTEND_GIT_REF:-release/20260708}}"
 
 # dispatch_ref 默认与 git_ref 相同
 BACKEND_DISPATCH_REF="${BACKEND_DISPATCH_REF:-$BACKEND_REF}"
@@ -90,7 +90,7 @@ trigger_repo() {
   local repo="$1"
   local dispatch_ref="$2"
   local git_ref="$3"
-  local url="https://api.github.com/repos/juege-osh/${repo}/actions/workflows/deploy-149.yml/dispatches"
+  local url="https://api.github.com/repos/juege-osh/${repo}/actions/workflows/deploy-prod.yml/dispatches"
   echo "→ 触发 juege-osh/${repo}  dispatch_ref=${dispatch_ref} git_ref=${git_ref} slot=${SLOT}"
   local resp http_code body
   resp=$(curl -sS -w "\n%{http_code}" -X POST \

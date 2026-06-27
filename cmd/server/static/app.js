@@ -708,6 +708,16 @@
 
     if (rel && inProgress) {
       const deploy = deployStep(rel);
+      const reverting = isRevertingDeploy(rel);
+      const cancelBtn = $('btnCancelBlueDeploy');
+      if (cancelBtn) cancelBtn.hidden = reverting;
+      if (reverting) {
+        $('blueStepBadge').textContent = '第 4 步';
+        $('blueActionTitle').textContent = '正在终止部署…';
+        $('blueActionDesc').textContent = '正在取消 GitHub Actions 并回滚到部署前版本，请稍候。';
+        $('blueWaitingText').textContent = deploy?.message || '正在终止并回滚…（约 3–8 分钟）';
+        return;
+      }
       if (deploy?.status === 'success') {
         $('blueStepBadge').textContent = '第 4 步';
         $('blueActionTitle').textContent = '正在自动测试…';
@@ -723,6 +733,8 @@
         : '蓝环境已就绪，正在跑自动测试…';
       return;
     }
+    const cancelBlueBtn = $('btnCancelBlueDeploy');
+    if (cancelBlueBtn) cancelBlueBtn.hidden = true;
 
     if (step === 3 && rel && reviewsOK(rel.items?.[0]) && !rel.boss_approved) {
       $('blueStepBadge').textContent = '第 3 步';
@@ -834,7 +846,7 @@
         items: [{
           title: '前后端蓝环境部署',
           type: 'code',
-          ref: 'deploy-149',
+          ref: 'deploy-prod',
           developer: $('developer').value,
           expected_impact: '同步蓝环境代码，不影响生产',
           reviewer1: $('rev1').value,
@@ -1156,6 +1168,11 @@
     return (rel?.steps || []).find((s) => s.step_key === 'deploy_standby');
   }
 
+  function isRevertingDeploy(rel) {
+    const deploy = deployStep(rel);
+    return deploy?.status === 'running' && (deploy?.message || '').includes('终止');
+  }
+
   /** 当前应该做第几步（1-4），0=已完成，-1=失败 */
   function currentStep(rel) {
     if (!rel) return 1;
@@ -1252,6 +1269,16 @@
 
     if (rel && inProgress) {
       const deploy = deployStep(rel);
+      const reverting = isRevertingDeploy(rel);
+      const cancelBtn = $('btnCancelDeploy');
+      if (cancelBtn) cancelBtn.hidden = reverting;
+      if (reverting) {
+        $('stepBadge').textContent = '第 4 步';
+        $('actionTitle').textContent = '正在终止部署…';
+        $('actionDesc').textContent = '正在取消 GitHub Actions 并回滚到部署前版本，请稍候。';
+        $('waitingText').textContent = deploy?.message || '正在终止并回滚…（约 3–8 分钟）';
+        return;
+      }
       if (deploy?.status === 'success') {
         $('stepBadge').textContent = '第 4 步';
         $('actionTitle').textContent = '正在自动测试…';
@@ -1267,6 +1294,8 @@
         : '绿环境已就绪，正在跑自动测试…';
       return;
     }
+    const cancelBtn = $('btnCancelDeploy');
+    if (cancelBtn) cancelBtn.hidden = true;
 
     if (step === 3 && rel && reviewsOK(rel.items?.[0]) && !rel.boss_approved) {
       $('stepBadge').textContent = '第 3 步';
@@ -1661,7 +1690,7 @@
         items: [{
           title: '前后端绿环境部署',
           type: 'code',
-          ref: 'deploy-149',
+          ref: 'deploy-prod',
           developer: $('developer').value,
           expected_impact: $('impact').value,
           reviewer1: $('rev1').value,
@@ -1740,6 +1769,38 @@
     $('logFold').open = true;
     await loadActiveDeploy();
     schedulePoll();
+  }
+
+  async function cancelDeployRelease(release) {
+    if (!release?.id) return;
+    const actor = $('author').value.trim() || state.user?.username || 'ops';
+    if (!confirm('确定终止当前部署？\n\n将取消 GitHub Actions 并把环境回滚到本次部署前的版本。')) return;
+    state.busy = true;
+    const cancelBtn = $('btnCancelDeploy');
+    const cancelBlueBtn = $('btnCancelBlueDeploy');
+    if (cancelBtn) cancelBtn.disabled = true;
+    if (cancelBlueBtn) cancelBlueBtn.disabled = true;
+    try {
+      const rel = await api(`/api/releases/${release.id}/cancel-deploy`, {
+        method: 'POST',
+        body: JSON.stringify({ actor, reason: 'user cancel' }),
+      });
+      if (release.deploy_target === 'blue') {
+        state.currentBlue = rel;
+      } else {
+        state.current = rel;
+      }
+      toast('已终止部署，正在回滚到部署前版本…');
+      $('logFold').open = true;
+      renderUI();
+      renderBlueUI();
+      renderLogs(rel);
+      schedulePoll();
+    } finally {
+      state.busy = false;
+      if (cancelBtn) cancelBtn.disabled = false;
+      if (cancelBlueBtn) cancelBlueBtn.disabled = false;
+    }
   }
 
   async function handleMainAction() {
@@ -1839,7 +1900,9 @@
     $('btnLogout')?.addEventListener('click', logout);
     $('btnRollbackGreen')?.addEventListener('click', () => rollbackDeploy('green'));
     $('btnRollbackBlue')?.addEventListener('click', () => rollbackDeploy('blue'));
-    $('mainBtn').addEventListener('click', handleMainAction);
+    $('btnCancelDeploy')?.addEventListener('click', () => cancelDeployRelease(state.current));
+    $('btnCancelBlueDeploy')?.addEventListener('click', () => cancelDeployRelease(state.currentBlue));
+    $('mainBtn')?.addEventListener('click', handleMainAction);
     $('btnNewDeploy')?.addEventListener('click', resetDeploy);
     $('blueMainBtn')?.addEventListener('click', handleBlueMainAction);
     $('btnNewBlueDeploy')?.addEventListener('click', resetBlueDeploy);
