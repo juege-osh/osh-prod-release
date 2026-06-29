@@ -22,10 +22,12 @@ type Migration struct {
 }
 
 type ExecuteResult struct {
-	ID      string `json:"id"`
-	Target  string `json:"target"`
-	Success bool   `json:"success"`
-	Output  string `json:"output"`
+	ID         string `json:"id"`
+	Target     string `json:"target"`
+	Success    bool   `json:"success"`
+	Output     string `json:"output"`
+	BackupPath string `json:"backup_path,omitempty"`
+	Restored   bool   `json:"restored,omitempty"`
 }
 
 type Runner struct {
@@ -131,19 +133,53 @@ func (r *Runner) executeRawOn(ctx context.Context, slot, label, sqlText, actor s
 	}
 
 	b64 := base64.StdEncoding.EncodeToString([]byte(sqlText))
-	safeLabel := strings.NewReplacer("/", "_", " ", "_").Replace(label)
+	safeLabel := safeSQLLabel(label)
+	backupDir := sqlBackupDir(slot)
 	remote := fmt.Sprintf(
-		`set -e
-tmp="/tmp/osh-migration-%s.sql"
-echo '%s' | base64 -d > "$tmp"
-docker exec -i %s mysql -uroot -p'%s' %s < "$tmp"
-rm -f "$tmp"
-echo "__OSH_SQL_OK__"`,
-		safeLabel, b64, container, shellQuote(password), database,
+		`set -u
+tmp="/tmp/osh-migration-%[1]s.sql"
+backup_dir='%[2]s'
+container='%[3]s'
+database='%[4]s'
+password='%[5]s'
+mkdir -p "$backup_dir"
+backup="$backup_dir/%[1]s-$(date +%%Y%%m%%d%%H%%M%%S).sql"
+cleanup() {
+  rm -f "$tmp"
+}
+trap cleanup EXIT
+printf '%%s' '%[6]s' | base64 -d > "$tmp"
+echo "__OSH_SQL_BACKUP_START__ $backup"
+if ! docker exec "$container" mysqldump -uroot -p"$password" --single-transaction --routines --events --triggers --databases "$database" > "$backup"; then
+  echo "__OSH_SQL_BACKUP_FAILED__ $backup"
+  exit 20
+fi
+echo "__OSH_SQL_BACKUP_OK__ $backup"
+if docker exec -i "$container" mysql -uroot -p"$password" "$database" < "$tmp"; then
+  echo "__OSH_SQL_OK__"
+  exit 0
+fi
+apply_status=$?
+echo "__OSH_SQL_FAILED__ status=$apply_status"
+echo "__OSH_SQL_RESTORE_START__ $backup"
+if docker exec -i "$container" mysql -uroot -p"$password" < "$backup"; then
+  echo "__OSH_SQL_RESTORE_OK__ $backup"
+else
+  restore_status=$?
+  echo "__OSH_SQL_RESTORE_FAILED__ status=$restore_status backup=$backup"
+fi
+exit "$apply_status"`,
+		safeLabel, shellQuote(backupDir), shellQuote(container), shellQuote(database), shellQuote(password), b64,
 	)
 
 	out, err := r.ssh.Run(ctx, remote, 3*time.Minute)
-	res := &ExecuteResult{ID: label, Target: target, Output: out}
+	res := &ExecuteResult{
+		ID:         label,
+		Target:     target,
+		Output:     out,
+		BackupPath: extractMarkerValue(out, "__OSH_SQL_BACKUP_OK__"),
+		Restored:   strings.Contains(out, "__OSH_SQL_RESTORE_OK__"),
+	}
 	if err != nil {
 		res.Success = false
 		if out != "" {
@@ -218,6 +254,50 @@ func guardSQL(sql string) error {
 		}
 	}
 	return nil
+}
+
+func safeSQLLabel(label string) string {
+	label = strings.TrimSpace(label)
+	if label == "" {
+		return "custom"
+	}
+	var b strings.Builder
+	for _, r := range label {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r)
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '.', r == '_', r == '-':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	out := strings.Trim(b.String(), "_")
+	if out == "" {
+		return "custom"
+	}
+	return out
+}
+
+func sqlBackupDir(slot string) string {
+	if slot == "green" {
+		return "/opt/osh-green/004-log/osh/sql"
+	}
+	return "/opt/osh-prod-release/sql-backups/" + slot
+}
+
+func extractMarkerValue(output, marker string) string {
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, marker) {
+			return strings.TrimSpace(strings.TrimPrefix(line, marker))
+		}
+	}
+	return ""
 }
 
 func shellQuote(s string) string {

@@ -8,45 +8,52 @@ import (
 )
 
 type Config struct {
-	ListenAddr            string
-	DataDir               string
-	SQLitePath            string
-	MockMode              bool
-	ProdSSHHost           string
-	ProdSSHPort           int
-	ProdSSHUser           string
-	ProdSSHPassword       string
+	ListenAddr      string
+	DataDir         string
+	SQLitePath      string
+	MockMode        bool
+	ProdSSHHost     string
+	ProdSSHPort     int
+	ProdSSHUser     string
+	ProdSSHPassword string
 	// ProdExecMode: auto | local | ssh
 	// auto — local when script exists on this machine or PROD_HOST is local; else sshpass SSH
-	ProdExecMode          string
-	TrafficSwitchScript   string
-	GreenCodeSyncScript   string
-	BlueCodeSyncScript    string
-	StandbySyncScript   string
-	SlotPostDeployScript string
-	GitHubRepo            string
-	GitHubBackendRepo          string
-	GitHubFrontendRepo         string
-	GitHubDispatchRef          string // fallback workflow ref for both repos
-	GitHubBackendDispatchRef   string // workflow_dispatch ref (backend)
-	GitHubFrontendDispatchRef  string // workflow_dispatch ref (frontend)
-	GitHubBackendGitRef        string // git_ref input: branch/SHA to build (backend)
-	GitHubFrontendGitRef       string // git_ref input: branch/SHA to build (frontend)
-	GitHubToken                string
-	AnalyzerURL           string
-	BossReviewer          string
-	SuperAdminUser        string
-	SuperAdminPassword    string
-	AuthPepper            string
-	AuthUsers             []AuthUserEntry
-	APIToken              string
-	GreenMySQLContainer    string
-	GreenMySQLDatabase     string
-	GreenMySQLRootPassword string
-	BlueMySQLContainer     string
-	BlueMySQLDatabase      string
-	BlueMySQLRootPassword  string
-	MigrationsDir          string
+	ProdExecMode              string
+	TrafficSwitchScript       string
+	GreenCodeSyncScript       string
+	BlueCodeSyncScript        string
+	StandbySyncScript         string
+	BlueToGreenAllSyncScript  string
+	SlotPostDeployScript      string
+	ComponentChangeScript     string
+	GitHubRepo                string
+	GitHubBackendRepo         string
+	GitHubFrontendRepo        string
+	GitHubDispatchRef         string // fallback workflow ref for both repos
+	GitHubBackendDispatchRef  string // workflow_dispatch ref (backend)
+	GitHubFrontendDispatchRef string // workflow_dispatch ref (frontend)
+	GitHubBackendGitRef       string // git_ref input: branch/SHA to build (backend)
+	GitHubFrontendGitRef      string // git_ref input: branch/SHA to build (frontend)
+	GitHubToken               string
+	AnalyzerURL               string
+	BossReviewer              string
+	SuperAdminUser            string
+	SuperAdminPassword        string
+	AuthPepper                string
+	AuthUsers                 []AuthUserEntry
+	APIToken                  string
+	SMTPHost                  string
+	SMTPPort                  int
+	SMTPUser                  string
+	SMTPPassword              string
+	SMTPFrom                  string
+	GreenMySQLContainer       string
+	GreenMySQLDatabase        string
+	GreenMySQLRootPassword    string
+	BlueMySQLContainer        string
+	BlueMySQLDatabase         string
+	BlueMySQLRootPassword     string
+	MigrationsDir             string
 }
 
 type AuthUserEntry struct {
@@ -57,27 +64,30 @@ type AuthUserEntry struct {
 
 func Load(path string) (*Config, error) {
 	c := &Config{
-		ListenAddr:          ":8765",
-		DataDir:             "./data",
-		SQLitePath:          "./data/platform.db",
-		MockMode:            true,
-		ProdSSHHost:         "149.88.92.159",
-		ProdSSHPort:         16328,
-		ProdSSHUser:         "root",
-		ProdExecMode:        "auto",
-		TrafficSwitchScript: "/opt/osh-green/005-scripts/osh-traffic-switch.sh",
-		GreenCodeSyncScript: "/opt/osh-deploy-tools/osh-green-code-sync.sh",
-		BlueCodeSyncScript:  "/opt/osh-deploy-tools/osh-prod-code-sync.sh",
-		StandbySyncScript:   "/opt/osh-green/005-scripts/osh-prod-standby-sync.sh",
-		SlotPostDeployScript: "/opt/osh-green/005-scripts/osh-slot-postdeploy.sh",
-		AnalyzerURL:         "http://127.0.0.1:8766",
-		BossReviewer:        "juege",
-		SuperAdminUser:      "juege",
-		GreenMySQLContainer: "osh-g-mysql",
-		GreenMySQLDatabase:  "backstage",
-		BlueMySQLContainer:  "osh-mysql",
-		BlueMySQLDatabase:   "backstage",
-		MigrationsDir:       "./migrations",
+		ListenAddr:               ":8765",
+		DataDir:                  "./data",
+		SQLitePath:               "./data/platform.db",
+		MockMode:                 true,
+		ProdSSHHost:              "149.88.92.159",
+		ProdSSHPort:              16328,
+		ProdSSHUser:              "root",
+		ProdExecMode:             "auto",
+		TrafficSwitchScript:      "/opt/osh-green/005-scripts/osh-traffic-switch.sh",
+		GreenCodeSyncScript:      "/opt/osh-deploy-tools/osh-green-code-sync.sh",
+		BlueCodeSyncScript:       "/opt/osh-deploy-tools/osh-prod-code-sync.sh",
+		StandbySyncScript:        "/opt/osh-green/005-scripts/osh-prod-standby-sync.sh",
+		BlueToGreenAllSyncScript: "/opt/osh-green/005-scripts/run-incremental-blue-to-green-all-components.sh",
+		SlotPostDeployScript:     "/opt/osh-green/005-scripts/osh-slot-postdeploy.sh",
+		ComponentChangeScript:    "/opt/osh-prod-release/scripts/osh-component-change.sh",
+		AnalyzerURL:              "http://127.0.0.1:8766",
+		BossReviewer:             "juege",
+		SuperAdminUser:           "juege",
+		SMTPPort:                 25,
+		GreenMySQLContainer:      "osh-g-mysql",
+		GreenMySQLDatabase:       "backstage",
+		BlueMySQLContainer:       "osh-mysql",
+		BlueMySQLDatabase:        "backstage",
+		MigrationsDir:            "./migrations",
 	}
 	if path == "" {
 		return c, nil
@@ -162,8 +172,14 @@ func Load(path string) (*Config, error) {
 	if v := kv["STANDBY_SYNC_SCRIPT"]; v != "" {
 		c.StandbySyncScript = v
 	}
+	if v := kv["BLUE_TO_GREEN_ALL_SYNC_SCRIPT"]; v != "" {
+		c.BlueToGreenAllSyncScript = v
+	}
 	if v := kv["SLOT_POSTDEPLOY_SCRIPT"]; v != "" {
 		c.SlotPostDeployScript = v
+	}
+	if v := kv["COMPONENT_CHANGE_SCRIPT"]; v != "" {
+		c.ComponentChangeScript = v
 	}
 	c.GitHubRepo = kv["GITHUB_REPO"]
 	c.GitHubBackendRepo = kv["GITHUB_BACKEND_REPO"]
@@ -195,6 +211,15 @@ func Load(path string) (*Config, error) {
 		c.AuthUsers = parseAuthUsers(v)
 	}
 	c.APIToken = kv["API_TOKEN"]
+	c.SMTPHost = kv["SMTP_HOST"]
+	if v := kv["SMTP_PORT"]; v != "" {
+		if p, err := strconv.Atoi(v); err == nil {
+			c.SMTPPort = p
+		}
+	}
+	c.SMTPUser = kv["SMTP_USER"]
+	c.SMTPPassword = kv["SMTP_PASSWORD"]
+	c.SMTPFrom = kv["SMTP_FROM"]
 	if v := kv["GREEN_MYSQL_CONTAINER"]; v != "" {
 		c.GreenMySQLContainer = v
 	}

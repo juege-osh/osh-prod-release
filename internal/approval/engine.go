@@ -36,9 +36,6 @@ func (e *Engine) ItemReviewOK(item models.ChangeItem) (bool, string) {
 		if !rv.Tested {
 			return false, fmt.Sprintf("评审人 %s 未确认已实测", rv.Reviewer)
 		}
-		if item.DemoRequired && item.Developer == rv.Reviewer {
-			return false, "开发者不能自评通过，需另一位评审人确认"
-		}
 		if item.DemoRequired && rv.Reviewer != item.Developer {
 			if !rv.DemoSeen {
 				return false, fmt.Sprintf("评审人 %s 需确认已观看开发者演示", rv.Reviewer)
@@ -67,14 +64,16 @@ func (e *Engine) AllItemsReviewOK(items []models.ChangeItem) (bool, string) {
 	return true, ""
 }
 
-// CanStartDeploy checks reviews + boss approval; admins may bypass.
+// CanStartDeploy checks reviews + boss approval before any slot deployment.
 func (e *Engine) CanStartDeploy(rel models.Release, adminBypass bool) (bool, string) {
-	if adminBypass {
-		return true, ""
-	}
 	ok, msg := e.AllItemsReviewOK(rel.Items)
 	if !ok {
 		return false, msg
+	}
+	if e.NeedsPerItemBossApproval(rel.Level) {
+		if ok, msg := e.AllItemsBossApprovalOK(rel.Items); !ok {
+			return false, msg
+		}
 	}
 	if !rel.BossApproved {
 		return false, fmt.Sprintf("需要 %s 终审通过", e.BossName)
@@ -85,4 +84,13 @@ func (e *Engine) CanStartDeploy(rel models.Release, adminBypass bool) (bool, str
 // NeedsPerItemBossApproval returns true for urgent releases.
 func (e *Engine) NeedsPerItemBossApproval(level models.ReleaseLevel) bool {
 	return level == models.LevelUrgent
+}
+
+func (e *Engine) AllItemsBossApprovalOK(items []models.ChangeItem) (bool, string) {
+	for _, it := range items {
+		if !it.BossApproved {
+			return false, fmt.Sprintf("紧急上线项 [%s] 需要 %s 逐项确认", it.Title, e.BossName)
+		}
+	}
+	return true, ""
 }

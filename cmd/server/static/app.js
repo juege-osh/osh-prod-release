@@ -6,7 +6,127 @@
     health: null, current: null, currentBlue: null, pollTimer: null, blueDeployPollTimer: null,
     busy: false, page: 'deploy', activeDeploy: null, activePollTimer: null, traffic: null,
     trafficLoading: false, blueActive: null, bluePollTimer: null,
-    user: null, token: sessionStorage.getItem('osh_token') || '',
+    componentSyncActive: null, componentSyncPollTimer: null,
+    warRoom: { items: [], view: 'table', activeComponent: 'mysql', specs: [], executions: [], reports: [], conflicts: [] },
+    componentOpsTab: 'mysql',
+    componentOpsQueue: [],
+    adminUsers: [],
+    user: null, token: sessionStorage.getItem('osh_token') || '', authMode: 'login',
+  };
+
+  const WAR_COMPONENTS = {
+    mysql: {
+      label: 'MySQL',
+      summary: 'MySQL · 数据库变更',
+      type: 'migration',
+      action: 'apply',
+      title: '例：新增订单扩展字段',
+      ref: 'SQL 文件路径或迁移说明，例如 /opt/osh-prod-release/migrations/20260708_order.sql',
+      node: '例：osh-g-mysql 或 all',
+      impact: '说明会影响哪些表、接口、后台页面',
+      data: '例：alter order_ext 新增 channel 字段；预计新增 0 行，修改 1 张表',
+      test: '执行接口回归 + 查询表结构 + 对比上线前后行数/字段',
+      rollback: '自动快照恢复；必要时执行回滚 SQL',
+      guide: '填写 SQL 文件或迁移说明。平台会先在绿库执行前做快照，失败自动恢复。',
+    },
+    redis: {
+      label: 'Redis',
+      summary: 'Redis · 缓存 / key 变更',
+      type: 'component',
+      action: 'apply',
+      title: '例：新增登录态缓存 key',
+      ref: 'Redis 命令文件路径，或 key 前缀说明',
+      node: '例：osh-g-redis 或 all',
+      impact: '说明新增/修改哪些缓存 key，是否影响登录、支付、任务',
+      data: '例：新增 session:* key，TTL 2 小时，预计数量 1 万以内',
+      test: 'PING + key 采样 + 业务接口读取缓存验证',
+      rollback: '删除新增 key 或恢复上线前 RDB/快照',
+      guide: '适合缓存 key、TTL、预热数据变更。不要直接写蓝 Redis，先在绿环境验证。',
+    },
+    nacos: {
+      label: 'Nacos',
+      summary: 'Nacos · 配置变更',
+      type: 'config',
+      action: 'apply',
+      title: '例：调整支付回调配置',
+      ref: 'dataId / group / namespace，或配置脚本路径',
+      node: '例：osh-g-nacos 或 namespace',
+      impact: '说明哪些服务会读取该配置，是否需要重启',
+      data: '例：修改 payment.callback.timeout，从 3s 到 5s',
+      test: '检查配置版本 + 服务读取配置 + 接口回归',
+      rollback: '恢复 Nacos 配置快照或上一版本',
+      guide: '填写 dataId、group、namespace 和影响服务。上线后重点验证服务是否读到绿环境配置。',
+    },
+    es: {
+      label: 'ES',
+      summary: 'ES · 索引 / mapping',
+      type: 'component',
+      action: 'apply',
+      title: '例：新增课程搜索字段',
+      ref: '索引名 / mapping 文件 / 脚本路径',
+      node: '例：course_index 或 all',
+      impact: '说明影响哪些搜索接口、索引和字段',
+      data: '例：course_index 新增 teacher_name keyword 字段，需回填 20 万文档',
+      test: 'cluster health + mapping 检查 + 搜索接口抽样',
+      rollback: '恢复索引快照或回滚 mapping/alias',
+      guide: '适合索引、mapping、alias、回填任务。先在绿 ES 看 health 和文档量变化。',
+    },
+    kafka: {
+      label: 'Kafka',
+      summary: 'Kafka · topic / 消费链路',
+      type: 'component',
+      action: 'create-topic',
+      title: '例：新增支付事件 topic',
+      ref: 'topic 名称，例如 osh.payment.event',
+      node: '分区数，例如 3',
+      impact: '说明生产者、消费者、消息格式和失败影响',
+      data: '例：新增 topic osh.payment.event，partition=3，日增 10 万消息',
+      test: 'topic list + 生产/消费 smoke + 消费组 lag 检查',
+      rollback: '若为新建 topic 且无业务使用，可删除 topic；否则停止生产者',
+      guide: 'Kafka 页签把“上线引用”当 topic 名，“目标节点”当分区数。适合小白直接填。',
+    },
+    mongodb: {
+      label: 'MongoDB',
+      summary: 'MongoDB · collection / index',
+      type: 'component',
+      action: 'apply',
+      title: '例：新增用户画像集合索引',
+      ref: 'collection / index 脚本路径',
+      node: '例：osh-g-mongodb 或 collection',
+      impact: '说明影响哪些集合、查询和接口',
+      data: '例：user_profile 新增 unionId_1 索引，预计 50 万文档',
+      test: 'mongo ping + explain + 接口查询抽样',
+      rollback: 'mongodump 快照恢复或删除新增索引',
+      guide: '适合新增 collection、索引、字段回填。未部署 MongoDB 时会作为扩展组件记录。',
+    },
+    hbase: {
+      label: 'HBase',
+      summary: 'HBase · 表 / 列族',
+      type: 'component',
+      action: 'apply',
+      title: '例：新增行为日志列族',
+      ref: '表名 / shell 脚本路径',
+      node: '例：osh-g-hbase 或 table',
+      impact: '说明影响哪些表、列族、离线任务和查询',
+      data: '例：behavior_log 新增 cf_ext 列族，预计日增 200 万行',
+      test: 'hbase shell status + table exists + row count 抽样',
+      rollback: 'HBase snapshot 恢复或删除新增列族/表',
+      guide: '适合表、列族、批量导入类变更。先写清楚数据量和回滚窗口。',
+    },
+    application: {
+      label: '代码',
+      summary: 'Java / Frontend · 应用功能',
+      type: 'code',
+      action: 'deploy',
+      title: '例：发布订单列表筛选功能',
+      ref: 'git branch / commit / 构建产物说明',
+      node: '例：osh-g-backend、osh-g-frontend 或 all',
+      impact: '说明影响哪些页面、接口、权限和用户',
+      data: '如无数据变更写“无”；如有接口新增字段请写清楚',
+      test: '接口回归 + 页面人工验收 + 日志错误检查',
+      rollback: '回滚到上一个 commit 或部署快照',
+      guide: '适合 Java 后端、前端页面和普通功能发布。代码上线也必须填评审和测试计划。',
+    },
   };
 
   function isAdmin() {
@@ -53,6 +173,9 @@
     badge.textContent = isAdmin() ? `${state.user.display_name || state.user.username} · 管理员` : (state.user.display_name || state.user.username);
     badge.className = `badge user-badge${isAdmin() ? ' admin' : ''}`;
     if (logout) logout.hidden = false;
+    document.querySelectorAll('.nav-item.admin-only').forEach((el) => {
+      el.hidden = !isAdmin();
+    });
     const author = $('author');
     const blueAuthor = $('blueAuthor');
     if (author) {
@@ -88,6 +211,72 @@
       errEl.hidden = false;
       errEl.textContent = err.message || String(err);
     }
+  }
+
+  async function register() {
+    const username = $('loginUser').value.trim();
+    const password = $('loginPass').value;
+    const password2 = $('registerPass2')?.value || '';
+    const displayName = $('registerDisplayName')?.value.trim() || username;
+    const errEl = $('loginError');
+    errEl.hidden = true;
+    if (password !== password2) {
+      errEl.hidden = false;
+      errEl.textContent = '两次输入的密码不一致';
+      return;
+    }
+    try {
+      const res = await fetch('/api/auth/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password, display_name: displayName }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || '注册失败');
+      state.token = data.token;
+      state.user = data.user;
+      sessionStorage.setItem('osh_token', state.token);
+      showApp(true);
+      renderUserBadge();
+      await bootApp();
+    } catch (err) {
+      errEl.hidden = false;
+      errEl.textContent = err.message || String(err);
+    }
+  }
+
+  async function submitAuth() {
+    if (state.authMode === 'register') return register();
+    return login();
+  }
+
+  function renderAuthMode() {
+    const registering = state.authMode === 'register';
+    document.querySelectorAll('.register-only').forEach((el) => {
+      el.hidden = !registering;
+      if (registering) el.removeAttribute('hidden');
+      else el.setAttribute('hidden', '');
+    });
+    const pass = $('loginPass');
+    if (pass) {
+      pass.placeholder = registering ? '至少 8 位密码' : '请输入密码';
+      pass.autocomplete = registering ? 'new-password' : 'current-password';
+    }
+    const btn = $('btnLogin');
+    if (btn) btn.textContent = registering ? '创建账号并进入 →' : '登录 →';
+    const sw = $('btnAuthSwitch');
+    if (sw) sw.textContent = registering ? '返回登录' : '创建普通账号';
+    const hint = $('loginHint');
+    if (hint) hint.textContent = registering
+      ? '新账号默认为普通成员；发布仍需两位评审人测试通过和觉哥终审。'
+      : '管理员 juege 可直通发布；其他用户需双评审 + 终审。';
+    const errEl = $('loginError');
+    if (errEl) errEl.hidden = true;
+  }
+
+  function toggleAuthMode() {
+    state.authMode = state.authMode === 'login' ? 'register' : 'login';
+    renderAuthMode();
   }
 
   async function logout() {
@@ -180,8 +369,12 @@
 
   const PAGE_GROUPS = {
     deploy: 'green',
+    'war-room': 'green',
+    components: 'green',
     sql: 'green',
+    'sync-green': 'green',
     traffic: null,
+    users: null,
     'deploy-blue': 'blue',
     'sql-blue': 'blue',
     'sync-blue': 'blue',
@@ -192,13 +385,29 @@
       title: '部署绿环境',
       subtitle: '4 步向导 · GitHub Actions · 不影响蓝环境生产',
     },
+    components: {
+      title: '绿环境组件上线',
+      subtitle: 'MySQL / Redis / Nacos / ES / Kafka · 快照 · 增量 · 回滚',
+    },
     sql: {
-      title: '更新绿环境数据库',
-      subtitle: '自定义 SQL · 仅 osh-g-mysql · 与部署独立',
+      title: '绿环境组件上线',
+      subtitle: 'MySQL / Redis / Nacos / ES / Kafka · 快照 · 增量 · 回滚',
+    },
+    'war-room': {
+      title: 'Change 作战台',
+      subtitle: '组件级增量上线 · 先绿测试 · 切流后同步蓝',
+    },
+    'sync-green': {
+      title: '蓝到绿环境基线同步',
+      subtitle: '运维定时任务 · 不是 change 上线能力',
     },
     traffic: {
       title: '生产切流',
       subtitle: '蓝 ↔ 绿 · 149 :80 入口切换 · 与部署独立',
+    },
+    users: {
+      title: '用户管理',
+      subtitle: '管理员创建用户 · 调整角色 · 重置密码',
     },
     'deploy-blue': {
       title: '部署蓝环境',
@@ -285,6 +494,7 @@
   }
 
   function navigate(page) {
+    if (page === 'sql') page = 'components';
     if (!PAGES[page]) return;
     state.page = page;
     localStorage.setItem('osh_page', page);
@@ -293,7 +503,8 @@
     }
 
     document.querySelectorAll('.nav-item').forEach((el) => {
-      el.classList.toggle('active', el.dataset.page === page);
+      const navPage = el.dataset.page === 'sql' ? 'components' : el.dataset.page;
+      el.classList.toggle('active', navPage === page);
     });
     expandNavGroupForPage(page);
     document.querySelectorAll('.page').forEach((el) => {
@@ -307,6 +518,20 @@
 
     if (page === 'traffic') {
       loadTrafficPage();
+    }
+    if (page === 'sync-green') {
+      loadTrafficForGreenSyncPage();
+      loadComponentSyncActive();
+    }
+    if (page === 'war-room') {
+      loadWarRoom();
+    }
+    if (page === 'components') {
+      renderComponentOpsTab();
+      loadComponentOpsHistory();
+    }
+    if (page === 'users') {
+      loadAdminUsers();
     }
     if (page === 'deploy-blue') {
       loadTrafficForBluePages();
@@ -326,6 +551,14 @@
     if ((state.traffic?.active || 'unknown') === 'unknown') {
       setTimeout(loadTraffic, 2000);
     }
+  }
+
+  async function loadTrafficForGreenSyncPage() {
+    await loadTraffic();
+    if ((state.traffic?.active || 'unknown') === 'unknown') {
+      setTimeout(loadTraffic, 2000);
+    }
+    renderGreenSyncUI();
   }
 
   function setNavGroupOpen(group, open) {
@@ -429,8 +662,9 @@
   }
 
   function initPageFromHash() {
-    const hash = (location.hash || '').replace('#', '').replace(/^\//, '');
-    const page = PAGES[hash] ? hash : (localStorage.getItem('osh_page') || 'deploy');
+    let hash = (location.hash || '').replace('#', '').replace(/^\//, '');
+    if (hash === 'sql') hash = 'components';
+    const page = PAGES[hash] ? hash : (localStorage.getItem('osh_page') === 'sql' ? 'components' : (localStorage.getItem('osh_page') || 'deploy'));
     state.page = page;
     initNavGroups();
     navigate(page);
@@ -449,8 +683,16 @@
     return (state.traffic?.active || '') === 'green';
   }
 
+  function isProductionBlue() {
+    return (state.traffic?.active || '') === 'blue';
+  }
+
   function isBlueBusy() {
     return !!state.blueActive?.busy;
+  }
+
+  function isComponentSyncBusy() {
+    return !!state.componentSyncActive?.busy;
   }
 
   function canOperateBlue() {
@@ -459,6 +701,10 @@
 
   function canOperateBlueSql() {
     return canOperateBlue();
+  }
+
+  function canOperateGreenSync() {
+    return isProductionBlue() && !isAnyDeployBusy() && !isComponentSyncBusy() && !state.busy;
   }
 
   function productionTrafficBanner(context) {
@@ -495,6 +741,115 @@
       return '当前生产为蓝环境，请先切流到绿环境后再操作蓝环境。';
     }
     return '暂时无法确认生产流量，请稍后重试。';
+  }
+
+  function greenSyncGuardMessage() {
+    const active = state.traffic?.active || 'unknown';
+    if (active === 'blue') return '';
+    if (active === 'green') return '当前生产为绿环境，不能再用蓝环境覆盖绿环境。';
+    return '暂时无法确认生产流量，请稍后重试。';
+  }
+
+  function renderGreenSyncGuard() {
+    const banner = $('greenSyncGuardBanner');
+    const text = $('greenSyncGuardText');
+    const iconEl = banner?.querySelector('.lock-icon');
+    if (!banner || !text) return;
+    const active = state.traffic?.active || 'unknown';
+    const loading = state.trafficLoading;
+    banner.hidden = false;
+    banner.classList.remove('warn', 'ok', 'self', 'loading');
+    if (loading) {
+      banner.classList.add('self');
+      if (iconEl) iconEl.textContent = '⏳';
+      text.textContent = '正在检测当前生产流量…';
+      return;
+    }
+    if (active === 'blue') {
+      banner.classList.add('ok');
+      if (iconEl) iconEl.textContent = '✓';
+      text.textContent = '当前生产为蓝环境，可以把蓝环境基线同步到绿环境用于测试。';
+      return;
+    }
+    banner.classList.add('warn');
+    if (iconEl) iconEl.textContent = '⚠️';
+    text.textContent = greenSyncGuardMessage();
+  }
+
+  function renderGreenSyncLock() {
+    const banner = $('greenSyncLockBanner');
+    const text = $('greenSyncLockText');
+    if (!banner || !text) return;
+    if (!isComponentSyncBusy()) {
+      banner.hidden = true;
+      return;
+    }
+    banner.hidden = false;
+    text.textContent = state.componentSyncActive?.job?.message || '蓝→绿环境基线同步进行中…';
+  }
+
+  function renderGreenSyncResult() {
+    const resultEl = $('greenSyncResult');
+    const job = state.componentSyncActive?.job;
+    if (!resultEl || !job) return;
+    if (job.status === 'running') {
+      resultEl.hidden = true;
+      return;
+    }
+    resultEl.hidden = false;
+    resultEl.className = `sql-result ${job.status === 'success' ? 'ok' : 'err'}`;
+    const icon = job.status === 'success' ? '✓' : '✗';
+    resultEl.textContent = `${icon} ${job.message || job.status}\n${job.output || ''}`;
+  }
+
+  function greenSyncHintText() {
+    if (!isProductionBlue()) return greenSyncGuardMessage();
+    if (isAnyDeployBusy()) return '有发布单正在部署中，请等待完成。';
+    if (isComponentSyncBusy()) return state.componentSyncActive?.job?.message || '蓝→绿环境基线同步进行中…';
+    return '执行 run-incremental-blue-to-green-all-components.sh，只写绿环境；真正上线请走 Change 作战台。';
+  }
+
+  function renderGreenSyncUI() {
+    renderGreenSyncGuard();
+    renderGreenSyncLock();
+    const btn = $('btnSyncGreenAll');
+    const hint = $('greenSyncHint');
+    const tip = $('greenSyncTip');
+    if (btn) {
+      btn.disabled = !canOperateGreenSync();
+      btn.title = !isProductionBlue() ? '生产须在蓝环境' : isAnyDeployBusy() ? '部署进行中' : isComponentSyncBusy() ? '同步进行中' : '';
+    }
+    if (hint) hint.textContent = greenSyncHintText();
+    if (tip) {
+      tip.textContent = isProductionBlue()
+        ? '方向：蓝（生产）→ 绿（测试基线）· 运维基线同步'
+        : '方向保护：仅允许生产在蓝环境时执行，避免覆盖绿生产。';
+    }
+    renderGreenSyncResult();
+  }
+
+  async function loadComponentSyncActive() {
+    try {
+      state.componentSyncActive = await api('/api/component-sync/active');
+    } catch {
+      state.componentSyncActive = null;
+    }
+    renderGreenSyncUI();
+    scheduleComponentSyncPoll();
+  }
+
+  function scheduleComponentSyncPoll() {
+    if (state.componentSyncPollTimer) clearInterval(state.componentSyncPollTimer);
+    state.componentSyncPollTimer = null;
+    if (!isComponentSyncBusy()) return;
+    state.componentSyncPollTimer = setInterval(async () => {
+      await loadComponentSyncActive();
+      if (!isComponentSyncBusy()) {
+        clearInterval(state.componentSyncPollTimer);
+        state.componentSyncPollTimer = null;
+        renderGreenSyncUI();
+      }
+    }, 5000);
   }
 
   async function loadBlueActive() {
@@ -1017,7 +1372,7 @@
     if (!sql) { toast('请先填写 SQL', 'error'); return; }
     const actor = $('author')?.value.trim() || 'ops';
     const label = $('blueSqlLabel')?.value.trim() || 'custom';
-    if (!confirm('确认将以下 SQL 执行到蓝环境 MySQL？\n\n目标：osh-mysql / backstage（待命库）\n\n增量更新，不可自动回滚。')) return;
+    if (!confirm('确认将以下 SQL 执行到蓝环境 MySQL？\n\n目标：osh-mysql / backstage（待命库）\n\n执行前会生成快照；失败会自动尝试恢复。')) return;
 
     state.busy = true;
     $('loading')?.classList.add('show');
@@ -1032,14 +1387,14 @@
       });
       if (resultEl) {
         resultEl.hidden = false;
-        resultEl.textContent = `✓ 执行成功\n${res.output || ''}`;
+        resultEl.textContent = formatSqlResult(res, '✓ 执行成功');
         resultEl.className = 'sql-result ok';
       }
       toast('SQL 已执行到蓝库');
     } catch (err) {
       if (resultEl) {
         resultEl.hidden = false;
-        resultEl.textContent = `✗ 执行失败\n${formatSqlError(err.message || String(err))}`;
+        resultEl.textContent = formatSqlFailure(err);
         resultEl.className = 'sql-result err';
       }
       toast(formatSqlError(err.message || String(err)).split('\n')[0], 'error');
@@ -1081,6 +1436,40 @@
       state.busy = false;
       $('loading').classList.remove('show');
       renderBlueUI();
+    }
+  }
+
+  async function syncGreenAllComponents() {
+    if (!canOperateGreenSync()) {
+      toast(greenSyncHintText(), 'error');
+      return;
+    }
+    const actor = state.user?.username || $('author')?.value?.trim() || 'ops';
+    const reason = $('greenSyncReason')?.value?.trim() || '';
+    if (!confirm('确认执行蓝→绿环境基线同步？\n\n只读蓝环境，写入绿环境；不会切流，不会操作蓝环境。真正上线请走 Change 作战台。')) return;
+
+    state.busy = true;
+    $('loading').classList.add('show');
+    const resultEl = $('greenSyncResult');
+    if (resultEl) resultEl.hidden = true;
+    renderGreenSyncUI();
+    try {
+      const job = await api('/api/component-sync/blue-to-green/all', {
+        method: 'POST',
+        body: JSON.stringify({ actor, reason }),
+      });
+      state.componentSyncActive = { busy: true, job };
+      toast('已启动蓝→绿环境基线同步…');
+      renderGreenSyncUI();
+      scheduleComponentSyncPoll();
+      await loadComponentSyncActive();
+    } catch (err) {
+      toast(err.message || String(err), 'error');
+      renderGreenSyncUI();
+    } finally {
+      state.busy = false;
+      $('loading').classList.remove('show');
+      renderGreenSyncUI();
     }
   }
 
@@ -1137,7 +1526,11 @@
     });
     let data = {};
     try { data = await res.json(); } catch { /* empty */ }
-    if (!res.ok) throw new Error(data.error || res.statusText);
+    if (!res.ok) {
+      const err = new Error(data.error || res.statusText);
+      err.data = data;
+      throw err;
+    }
     return data;
   }
 
@@ -1153,6 +1546,294 @@
     return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   }
 
+  function warValue(id) {
+    return ($(id)?.value || '').trim();
+  }
+
+  function activeWarComponent() {
+    return WAR_COMPONENTS[state.warRoom.activeComponent] || WAR_COMPONENTS.mysql;
+  }
+
+  function setPlaceholder(id, text) {
+    const el = $(id);
+    if (el) el.placeholder = text || '';
+  }
+
+  function renderWarComponentPicker() {
+    const tpl = activeWarComponent();
+    document.querySelectorAll('[data-component-tab]').forEach((btn) => {
+      const active = btn.dataset.componentTab === state.warRoom.activeComponent;
+      btn.classList.toggle('active', active);
+      btn.setAttribute('aria-selected', active ? 'true' : 'false');
+    });
+    const select = $('componentType');
+    if (select) select.value = state.warRoom.activeComponent;
+    const name = $('activeComponentName');
+    if (name) name.textContent = tpl.label;
+    const summary = $('activeComponentSummary');
+    if (summary) summary.textContent = tpl.summary;
+    const guide = $('warComponentGuide');
+    if (guide) {
+      guide.innerHTML = `<strong>${escapeHtml(tpl.label)} 上线怎么填</strong><span>${escapeHtml(tpl.guide)}</span>`;
+    }
+    const changeType = $('changeType');
+    if (changeType) changeType.value = tpl.type;
+    const action = $('changeAction');
+    if (action && (!action.value.trim() || action.dataset.templateValue === action.value)) {
+      action.value = tpl.action;
+    }
+    if (action) action.dataset.templateValue = tpl.action;
+    setPlaceholder('changeTitle', tpl.title);
+    setPlaceholder('changeRef', tpl.ref);
+    setPlaceholder('targetNode', tpl.node);
+    setPlaceholder('changeAction', tpl.action);
+    setPlaceholder('expectedImpact', tpl.impact);
+    setPlaceholder('dataImpact', tpl.data);
+    setPlaceholder('testPlan', tpl.test);
+    setPlaceholder('rollbackStrategy', tpl.rollback);
+  }
+
+  function selectWarComponent(kind) {
+    if (!WAR_COMPONENTS[kind]) return;
+    state.warRoom.activeComponent = kind;
+    renderWarComponentPicker();
+  }
+
+  async function loadWarRoom() {
+    renderWarRoom();
+    renderWarComponentPicker();
+    try {
+      state.warRoom.specs = await api('/api/components/specs');
+    } catch {
+      state.warRoom.specs = [];
+    }
+    if (state.current?.id) {
+      try {
+        const [executions, reports, conflicts] = await Promise.all([
+          api(`/api/releases/${state.current.id}/executions`),
+          api(`/api/releases/${state.current.id}/component-reports`),
+          api(`/api/releases/${state.current.id}/conflicts`),
+        ]);
+        state.warRoom.executions = executions;
+        state.warRoom.reports = reports;
+        state.warRoom.conflicts = conflicts;
+      } catch {
+        state.warRoom.executions = [];
+        state.warRoom.reports = [];
+        state.warRoom.conflicts = [];
+      }
+    }
+    renderWarRoom();
+    renderComponentSpecs();
+    renderWarReports();
+  }
+
+  function addWarItem() {
+    const title = warValue('changeTitle');
+    if (!title) {
+      toast('请填写 Change 标题', 'error');
+      return;
+    }
+    const reviewers = warValue('changeReviewers').split(',').map((v) => v.trim()).filter(Boolean);
+    if (reviewers.length < 2) {
+      toast('每个 change 必须填写两个评审人，用英文逗号分隔', 'error');
+      return;
+    }
+    const componentType = state.warRoom.activeComponent || warValue('componentType') || 'application';
+    const item = {
+      title,
+      type: warValue('changeType') || 'component',
+      ref: warValue('changeRef') || title,
+      developer: warValue('changeDeveloper') || state.user?.username || 'developer',
+      expected_impact: warValue('expectedImpact'),
+      component: componentType === 'application' ? 'application' : componentType,
+      component_type: componentType,
+      action: warValue('changeAction') || 'apply',
+      target_slot: 'green',
+      target_node: warValue('targetNode') || 'all',
+      deploy_order: Number(warValue('warDeployOrder') || 100),
+      impact_scope: warValue('expectedImpact'),
+      data_impact: warValue('dataImpact'),
+      test_plan: warValue('testPlan'),
+      rollback_strategy: warValue('rollbackStrategy'),
+      conflict_owners: warValue('conflictOwners'),
+      notify_emails: warValue('notifyEmails'),
+      reviewer1: reviewers[0],
+      reviewer2: reviewers[1],
+    };
+    state.warRoom.items.push(item);
+    ['changeTitle', 'changeRef', 'expectedImpact', 'dataImpact', 'testPlan', 'rollbackStrategy'].forEach((id) => {
+      if ($(id)) $(id).value = '';
+    });
+    const action = $('changeAction');
+    if (action) action.value = activeWarComponent().action;
+    renderWarRoom();
+    renderWarComponentPicker();
+    toast('已加入 change 列表');
+  }
+
+  async function createWarRelease() {
+    const title = warValue('warReleaseTitle');
+    if (!title) {
+      toast('请填写发布名称', 'error');
+      return;
+    }
+    if (!state.warRoom.items.length) {
+      toast('请至少加入一个 change', 'error');
+      return;
+    }
+    const rel = await api('/api/releases', {
+      method: 'POST',
+      body: JSON.stringify({
+        title,
+        commit_sha: 'change-driven-release',
+        author: state.user?.username || warValue('changeDeveloper') || 'ops',
+        level: warValue('warLevel') || 'normal',
+        repo: 'juege-osh/osh',
+        deploy_target: 'green',
+        items: state.warRoom.items,
+      }),
+    });
+    state.current = rel;
+    state.warRoom.items = [];
+    await recordWarConflicts(rel);
+    toast('发布单已生成，请进入部署绿环境继续评审和上线');
+    renderWarRoom();
+    renderUI();
+    loadList();
+    navigate('deploy');
+  }
+
+  async function recordWarConflicts(rel) {
+    if (!rel?.id) return;
+    for (const item of rel.items || []) {
+      const owners = (item.conflict_owners || '').split(',').map((v) => v.trim()).filter(Boolean);
+      const emails = (item.notify_emails || '').split(',').map((v) => v.trim()).filter(Boolean);
+      for (let i = 0; i < owners.length; i += 1) {
+        await api(`/api/releases/${rel.id}/conflicts`, {
+          method: 'POST',
+          body: JSON.stringify({
+            item_id: item.id,
+            file_path: item.ref || item.title,
+            owner: owners[i],
+            email: emails[i] || '',
+            status: emails[i] ? 'pending' : 'audit_only',
+            message: 'Change 作战台记录冲突责任人；SMTP 未配置时仅审计不阻塞发布。',
+          }),
+        });
+      }
+    }
+  }
+
+  function renderWarRoom() {
+    const root = $('warRoomView');
+    if (!root) return;
+    document.querySelectorAll('[data-war-view]').forEach((btn) => {
+      btn.classList.toggle('active', btn.dataset.warView === state.warRoom.view);
+    });
+    const items = state.warRoom.items.length ? state.warRoom.items : (state.current?.items || []);
+    if (!items.length) {
+      root.innerHTML = `
+        <div class="war-empty">
+          <strong>还没有上线项</strong>
+          <span>按左侧 3 步来：填发布名称 → 选组件 → 填 change，然后点“加入 change 列表”。</span>
+          <span>多个组件可以一条一条加入，平台会按上线顺序执行。</span>
+        </div>`;
+      renderWarReports();
+      return;
+    }
+    if (state.warRoom.view === 'tree') {
+      root.innerHTML = items.map((it) => `
+        <div class="tree-node">
+          <strong>${escapeHtml(it.component || it.component_type || 'application')} · #${escapeHtml(it.deploy_order || 100)}</strong>
+          <span>${escapeHtml(it.title)} → ${escapeHtml(it.target_node || 'all')}</span>
+          <span>测试：${escapeHtml(it.test_plan || '未填写')}</span>
+          <span>回滚：${escapeHtml(it.rollback_strategy || '未填写')}</span>
+        </div>`).join('');
+      return;
+    }
+    if (state.warRoom.view === 'graph') {
+      root.innerHTML = `<div class="graph-flow">${items.map((it, i) => `
+        <div class="graph-node">
+          <strong>${escapeHtml(it.component || it.component_type || 'application')}</strong>
+          <span>${escapeHtml(it.title)}</span>
+          <span>${escapeHtml(it.target_node || 'all')}</span>
+        </div>${i < items.length - 1 ? '<span class="graph-arrow">→</span>' : ''}`).join('')}</div>`;
+      return;
+    }
+    root.innerHTML = `
+      <table class="war-table">
+        <thead><tr><th>顺序</th><th>组件</th><th>Change</th><th>节点</th><th>影响/测试</th><th>责任</th></tr></thead>
+        <tbody>${items.map((it) => `
+          <tr>
+            <td>${escapeHtml(it.deploy_order || 100)}</td>
+            <td>${escapeHtml(it.component_type || it.component || 'application')}</td>
+            <td><strong>${escapeHtml(it.title)}</strong><br><span>${escapeHtml(it.ref || '')}</span></td>
+            <td>${escapeHtml(it.target_node || 'all')}</td>
+            <td>${escapeHtml(it.expected_impact || '未填写')}<br><span>${escapeHtml(it.test_plan || '未填写测试计划')}</span></td>
+            <td>${escapeHtml(it.developer || '')}<br><span>${escapeHtml(it.reviewer1 || '')} / ${escapeHtml(it.reviewer2 || '')}</span></td>
+          </tr>`).join('')}</tbody>
+      </table>`;
+  }
+
+  function renderComponentSpecs() {
+    const el = $('componentSpecs');
+    if (!el) return;
+    if (!state.warRoom.specs.length) {
+      el.innerHTML = '<div class="empty">暂无组件规范模板</div>';
+      return;
+    }
+    el.innerHTML = state.warRoom.specs.map((sp) => `
+      <div class="spec-card">
+        <strong>${escapeHtml(sp.kind)} · ${escapeHtml(sp.name)}</strong>
+        <span>数据目录：${escapeHtml(sp.data_dir || '待定义')}</span>
+        <span>配置目录：${escapeHtml(sp.config_dir || '待定义')}</span>
+        <span>健康检查：${escapeHtml(sp.health_check || '待定义')}</span>
+        <span>回滚：${escapeHtml(sp.rollback_strategy || '待定义')}</span>
+      </div>`).join('');
+  }
+
+  function renderWarReports() {
+    const el = $('warReports');
+    if (!el) return;
+    const executions = state.warRoom.executions || [];
+    const reports = state.warRoom.reports || [];
+    const conflicts = state.warRoom.conflicts || [];
+    if (!executions.length && !reports.length && !conflicts.length) {
+      el.innerHTML = '<div class="empty">暂无执行记录；发布单跑到组件执行阶段后会显示。</div>';
+      return;
+    }
+    el.innerHTML = [
+      ...executions.map((e) => `
+        <div class="report-card"><strong>${escapeHtml(e.slot)} · ${escapeHtml(e.component)}</strong><span>${escapeHtml(e.status)} · ${escapeHtml(e.action)}</span><span>${escapeHtml(e.error || e.output || '已记录')}</span>${e.item_id ? `<div class="report-actions"><button type="button" class="mini-danger" data-rollback-item="${escapeHtml(e.item_id)}" data-rollback-slot="${escapeHtml(e.slot || 'green')}">回滚${escapeHtml(e.slot || 'green')}</button></div>` : ''}</div>`),
+      ...reports.map((r) => `
+        <div class="report-card"><strong>测试 ${escapeHtml(r.slot)} · ${escapeHtml(r.component)}</strong><span>${r.passed ? '通过' : '失败'}</span><span>${escapeHtml(r.ai_verdict || '')}</span></div>`),
+      ...conflicts.map((c) => `
+        <div class="report-card"><strong>冲突通知 · ${escapeHtml(c.owner)}</strong><span>${escapeHtml(c.file_path)}</span><span>${escapeHtml(c.status)} ${escapeHtml(c.email || '')}</span></div>`),
+    ].join('');
+    el.querySelectorAll('[data-rollback-item]').forEach((btn) => {
+      btn.addEventListener('click', () => rollbackWarItem(btn.dataset.rollbackItem, btn.dataset.rollbackSlot || 'green'));
+    });
+  }
+
+  async function rollbackWarItem(itemId, slot = 'green') {
+    if (!itemId || state.busy) return;
+    if (!confirm(`确认回滚该上线项的 ${slot} 环境变更？`)) return;
+    state.busy = true;
+    try {
+      await api(`/api/items/${itemId}/rollback`, {
+        method: 'POST',
+        body: JSON.stringify({ slot, actor: state.user?.username || warValue('changeDeveloper') || 'ops' }),
+      });
+      toast('组件回滚已执行');
+      await loadWarRoom();
+    } catch (err) {
+      toast(err.message || String(err), 'error');
+    } finally {
+      state.busy = false;
+    }
+  }
+
   function reviewsOK(item) {
     if (!item) return false;
     const need = new Set([item.reviewer1, item.reviewer2].filter(Boolean));
@@ -1161,6 +1842,10 @@
       if (rv.result === 'approve' && rv.tested) ok.add(rv.reviewer);
     }
     return need.size === 2 && [...need].every((r) => ok.has(r));
+  }
+
+  function allReviewsOK(items) {
+    return (items || []).length > 0 && (items || []).every((item) => reviewsOK(item));
   }
 
   function autoTestStep(rel) {
@@ -1196,9 +1881,9 @@
       return 4;
     }
 
-    if (rel.boss_approved && reviewsOK(rel.items?.[0])) return 4;
+    if (rel.boss_approved && allReviewsOK(rel.items)) return 4;
     if (isAdmin() && rel.boss_approved && ['draft', 'approved'].includes(rel.status)) return 4;
-    if (reviewsOK(rel.items?.[0]) && !rel.boss_approved) return 3;
+    if (allReviewsOK(rel.items) && !rel.boss_approved) return 3;
     if (rel.status === 'draft') return isAdmin() && rel.boss_approved ? 4 : 2;
     if (rel.status === 'reviewing') return 3;
     return 2;
@@ -1375,13 +2060,19 @@
     const tip = $('sqlTip');
     if (tip) {
       tip.textContent = mysql.configured
-        ? `目标：${mysql.green_container || 'osh-g-mysql'} / ${mysql.green_database || 'backstage'}`
+        ? `目标：${mysql.green_container || 'osh-g-mysql'} / ${mysql.green_database || 'backstage'} · 执行前快照，失败自动恢复`
         : '请在 config.env 配置 GREEN_MYSQL_ROOT_PASSWORD 后才能执行 SQL。';
+    }
+    const compTip = $('componentOpsTip');
+    if (compTip) {
+      compTip.textContent = mysql.configured
+        ? `绿环境：${mysql.green_container || 'osh-g-mysql'} · 各组件执行前自动快照，失败可一键回滚`
+        : '请先配置绿环境组件连接信息后再执行。';
     }
     const blueSqlTip = $('blueSqlTip');
     if (blueSqlTip) {
       blueSqlTip.textContent = mysql.configured
-        ? `目标：${mysql.blue_container || 'osh-mysql'} / ${mysql.blue_database || 'backstage'} · 增量 SQL，非全量同步`
+        ? `目标：${mysql.blue_container || 'osh-mysql'} / ${mysql.blue_database || 'backstage'} · 增量 SQL，执行前快照`
         : '请在 config.env 配置 BLUE_MYSQL_ROOT_PASSWORD（或与绿库相同）后才能执行。';
     }
   }
@@ -1406,6 +2097,523 @@
     $('customSql').value = data.sql || '';
     if (!$('sqlLabel').value.trim()) $('sqlLabel').value = id;
     toast('模板已填入，请检查后再执行');
+  }
+
+  const COMPONENT_BATCH_ORDER = { mysql: 10, nacos: 20, redis: 30, es: 40, kafka: 50 };
+
+  const COMPONENT_TEST_CASES = {
+    mysql: {
+      label: '绿环境平台验收-MySQL',
+      sql: `-- OSH 平台组件上线测试 · MySQL
+USE backstage;
+CREATE TABLE IF NOT EXISTS osh_platform_test (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  case_name VARCHAR(64) NOT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+INSERT IGNORE INTO osh_platform_test (id, case_name) VALUES (1, 'platform-batch-test');`,
+    },
+    redis: {
+      label: '绿环境平台验收-Redis',
+      payload: 'SET osh:platform:test:key1 hello-from-platform EX 3600',
+    },
+    nacos: {
+      label: '绿环境平台验收-Nacos',
+      payload: `#!/usr/bin/env bash
+set -euo pipefail
+URL="http://127.0.0.1:28848"
+curl -sf "$URL/nacos/v1/ns/operator/metrics" | head -c 120
+echo
+echo "nacos platform smoke ok"`,
+    },
+    es: {
+      label: '绿环境平台验收-ES',
+      payload: `#!/usr/bin/env bash
+set -euo pipefail
+ENV_FILE="/opt/osh-green/001-docker-compose/osh/osh-green-stack.env"
+pass="$(awk -F= '$1=="ES_PASSWORD"{print substr($0,13);exit}' "$ENV_FILE")"
+URL="http://127.0.0.1:29200"
+INDEX="osh_platform_test"
+curl -sf -u "elastic:\${pass}" -X PUT "$URL/$INDEX" -H 'Content-Type: application/json' \\
+  -d '{"settings":{"number_of_shards":1,"number_of_replicas":0}}' || true
+curl -sf -u "elastic:\${pass}" "$URL/_cluster/health" | head -c 120
+echo
+echo "es platform smoke ok"`,
+    },
+    kafka: {
+      label: '绿环境平台验收-Kafka',
+      topic: 'osh.platform.test.event',
+      partitions: '1',
+    },
+  };
+
+  function componentKindLabel(kind) {
+    return ({ mysql: 'MySQL', redis: 'Redis', nacos: 'Nacos', es: 'ES', kafka: 'Kafka' })[kind] || kind;
+  }
+
+  function fillComponentTestCase(kind) {
+    const tc = COMPONENT_TEST_CASES[kind];
+    if (!tc) return;
+    if (kind === 'mysql') {
+      $('sqlLabel').value = tc.label;
+      $('customSql').value = tc.sql;
+    } else if (kind === 'redis') {
+      $('redisLabel').value = tc.label;
+      $('redisPayload').value = tc.payload;
+    } else if (kind === 'nacos') {
+      $('nacosLabel').value = tc.label;
+      $('nacosRef').value = '';
+      $('nacosPayload').value = tc.payload;
+    } else if (kind === 'es') {
+      $('esLabel').value = tc.label;
+      $('esRef').value = '';
+      $('esPayload').value = tc.payload;
+    } else if (kind === 'kafka') {
+      $('kafkaLabel').value = tc.label;
+      $('kafkaTopic').value = tc.topic;
+      $('kafkaPartitions').value = tc.partitions;
+    }
+    toast(`已填入 ${componentKindLabel(kind)} 测试用例，可「加入队列」或「立即执行」`);
+  }
+
+  function buildComponentQueueItem(kind) {
+    if (kind === 'mysql') {
+      const payload = $('customSql')?.value.trim();
+      if (!payload) throw new Error('请先填写 MySQL SQL');
+      return {
+        kind: 'mysql',
+        slot: 'green',
+        action: 'apply',
+        payload,
+        label: warValue('sqlLabel') || 'mysql-batch',
+        deploy_order: COMPONENT_BATCH_ORDER.mysql,
+      };
+    }
+    if (kind === 'redis') {
+      const payload = $('redisPayload')?.value.trim();
+      if (!payload) throw new Error('请填写 Redis 命令');
+      return {
+        kind: 'redis',
+        slot: 'green',
+        action: 'apply',
+        payload,
+        label: warValue('redisLabel') || 'redis-batch',
+        deploy_order: COMPONENT_BATCH_ORDER.redis,
+      };
+    }
+    if (kind === 'nacos') {
+      const ref = warValue('nacosRef');
+      const payload = $('nacosPayload')?.value.trim();
+      if (!ref && !payload) throw new Error('请填写 Nacos 脚本路径或内容');
+      return {
+        kind: 'nacos',
+        slot: 'green',
+        action: 'apply',
+        ref,
+        payload,
+        label: warValue('nacosLabel') || 'nacos-batch',
+        deploy_order: COMPONENT_BATCH_ORDER.nacos,
+      };
+    }
+    if (kind === 'es') {
+      const ref = warValue('esRef');
+      const payload = $('esPayload')?.value.trim();
+      if (!ref && !payload) throw new Error('请填写 ES 脚本路径或内容');
+      return {
+        kind: 'es',
+        slot: 'green',
+        action: 'apply',
+        ref,
+        payload,
+        label: warValue('esLabel') || 'es-batch',
+        deploy_order: COMPONENT_BATCH_ORDER.es,
+      };
+    }
+    if (kind === 'kafka') {
+      const topic = warValue('kafkaTopic');
+      if (!topic) throw new Error('请填写 Topic 名称');
+      return {
+        kind: 'kafka',
+        slot: 'green',
+        action: 'create-topic',
+        ref: topic,
+        node: warValue('kafkaPartitions') || '3',
+        label: warValue('kafkaLabel') || 'kafka-batch',
+        deploy_order: COMPONENT_BATCH_ORDER.kafka,
+      };
+    }
+    throw new Error(`未知组件: ${kind}`);
+  }
+
+  function queueComponentItem(kind) {
+    const item = buildComponentQueueItem(kind);
+    const dup = state.componentOpsQueue.some((q) => q.kind === item.kind && (q.ref || q.payload) === (item.ref || item.payload));
+    if (dup) {
+      toast(`${componentKindLabel(kind)} 相同内容已在队列中`, 'error');
+      return;
+    }
+    state.componentOpsQueue.push(item);
+    renderComponentOpsQueue();
+    toast(`${componentKindLabel(kind)} 已加入队列（共 ${state.componentOpsQueue.length} 项）`);
+  }
+
+  function renderComponentOpsQueue() {
+    const el = $('componentOpsQueue');
+    if (!el) return;
+    if (!state.componentOpsQueue.length) {
+      el.innerHTML = '<div class="empty">队列为空。切换页签填写后点「加入队列」。</div>';
+      return;
+    }
+    el.innerHTML = state.componentOpsQueue.map((item, idx) => {
+      const summary = item.kind === 'kafka'
+        ? `topic=${item.ref} · 分区=${item.node}`
+        : (item.ref || (item.payload || '').split('\n')[0] || '').slice(0, 80);
+      return `
+        <div class="component-queue-item" data-idx="${idx}">
+          <div class="component-queue-main">
+            <strong>${escapeHtml(componentKindLabel(item.kind))}</strong>
+            <span class="component-queue-order">顺序 ${item.deploy_order || '—'}</span>
+            <span class="component-queue-label">${escapeHtml(item.label || '')}</span>
+            <code class="component-queue-preview">${escapeHtml(summary)}</code>
+          </div>
+          <button type="button" class="btn btn-ghost btn-queue-remove" data-idx="${idx}">移除</button>
+        </div>`;
+    }).join('');
+    el.querySelectorAll('.btn-queue-remove').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const i = Number(btn.dataset.idx);
+        state.componentOpsQueue.splice(i, 1);
+        renderComponentOpsQueue();
+      });
+    });
+  }
+
+  async function execComponentBatch() {
+    if (!state.componentOpsQueue.length) {
+      toast('队列为空，请先加入组件', 'error');
+      return;
+    }
+    const kinds = state.componentOpsQueue.map((q) => componentKindLabel(q.kind)).join(' → ');
+    if (!confirm(`确认逐个执行 ${state.componentOpsQueue.length} 个组件到绿环境？\n\n执行顺序：${kinds}\n\n某项失败会记录并继续下一项，已成功的不回滚。`)) return;
+    state.busy = true;
+    $('loading')?.classList.add('show');
+    const resultEl = $('batchResult');
+    try {
+      const res = await api('/api/components/batch/apply', {
+        method: 'POST',
+        body: JSON.stringify({
+          items: state.componentOpsQueue,
+          actor: state.user?.username || 'ops',
+        }),
+      });
+      resultEl.hidden = false;
+      const partial = res.failed || (res.fail_count || 0) > 0;
+      resultEl.className = `sql-result ${partial ? 'warn' : 'ok'}`;
+      resultEl.textContent = formatBatchResult(res);
+      toast(partial
+        ? `逐个执行完成：${res.success_count || 0} 成功，${res.fail_count || 0} 失败`
+        : `全部 ${res.success_count || state.componentOpsQueue.length} 项执行成功`);
+      state.componentOpsQueue = [];
+      renderComponentOpsQueue();
+      await loadComponentOpsHistory();
+    } catch (err) {
+      const data = err?.data || {};
+      resultEl.hidden = false;
+      resultEl.className = 'sql-result error';
+      resultEl.textContent = formatBatchResult(data.result || data, err.message || String(err), true);
+      toast(err.message || '批量执行失败', 'error');
+      await loadComponentOpsHistory();
+    } finally {
+      state.busy = false;
+      $('loading')?.classList.remove('show');
+    }
+  }
+
+  function formatBatchResult(res, errMsg, isError) {
+    const lines = [];
+    if (isError) {
+      lines.push(`✗ 请求失败：${errMsg || ''}`);
+    } else {
+      const ok = res?.success_count ?? 0;
+      const bad = res?.fail_count ?? 0;
+      lines.push(`逐个执行：${ok} 成功，${bad} 失败`);
+      if (res?.message) lines.push(res.message);
+    }
+    (res?.results || []).forEach((r, i) => {
+      const mark = r.status === 'success' ? '✓' : '✗';
+      lines.push('', `${mark} [${i + 1}] ${r.kind} · ${r.status}`);
+      if (r.output) lines.push(r.output.slice(0, 800));
+    });
+    return lines.join('\n');
+  }
+
+  function testCaseToQueueItem(kind) {
+    const tc = COMPONENT_TEST_CASES[kind];
+    if (!tc) return null;
+    if (kind === 'mysql') {
+      return { kind, slot: 'green', action: 'apply', payload: tc.sql, label: tc.label, deploy_order: COMPONENT_BATCH_ORDER.mysql };
+    }
+    if (kind === 'redis') {
+      return { kind, slot: 'green', action: 'apply', payload: tc.payload, label: tc.label, deploy_order: COMPONENT_BATCH_ORDER.redis };
+    }
+    if (kind === 'nacos') {
+      return { kind, slot: 'green', action: 'apply', payload: tc.payload, label: tc.label, deploy_order: COMPONENT_BATCH_ORDER.nacos };
+    }
+    if (kind === 'es') {
+      return { kind, slot: 'green', action: 'apply', payload: tc.payload, label: tc.label, deploy_order: COMPONENT_BATCH_ORDER.es };
+    }
+    if (kind === 'kafka') {
+      return {
+        kind, slot: 'green', action: 'create-topic', ref: tc.topic, node: tc.partitions,
+        label: tc.label, deploy_order: COMPONENT_BATCH_ORDER.kafka,
+      };
+    }
+    return null;
+  }
+
+  function fillAllComponentTestCases() {
+    Object.keys(COMPONENT_TEST_CASES).forEach((kind) => {
+      const tc = COMPONENT_TEST_CASES[kind];
+      if (kind === 'mysql') {
+        $('sqlLabel').value = tc.label;
+        $('customSql').value = tc.sql;
+      } else if (kind === 'redis') {
+        $('redisLabel').value = tc.label;
+        $('redisPayload').value = tc.payload;
+      } else if (kind === 'nacos') {
+        $('nacosLabel').value = tc.label;
+        $('nacosRef').value = '';
+        $('nacosPayload').value = tc.payload;
+      } else if (kind === 'es') {
+        $('esLabel').value = tc.label;
+        $('esRef').value = '';
+        $('esPayload').value = tc.payload;
+      } else if (kind === 'kafka') {
+        $('kafkaLabel').value = tc.label;
+        $('kafkaTopic').value = tc.topic;
+        $('kafkaPartitions').value = tc.partitions;
+      }
+    });
+    state.componentOpsQueue = Object.keys(COMPONENT_TEST_CASES).map((kind) => testCaseToQueueItem(kind)).filter(Boolean);
+    renderComponentOpsQueue();
+    toast('已填入全部测试用例并加入队列（MySQL → Nacos → Redis → ES → Kafka），可一键执行');
+  }
+
+  function renderComponentOpsTab(tab) {
+    if (tab) state.componentOpsTab = tab;
+    const active = state.componentOpsTab || 'mysql';
+    document.querySelectorAll('[data-ops-tab]').forEach((btn) => {
+      btn.classList.toggle('active', btn.dataset.opsTab === active);
+    });
+    document.querySelectorAll('[data-ops-panel]').forEach((panel) => {
+      const show = panel.dataset.opsPanel === active;
+      panel.hidden = !show;
+    });
+  }
+
+  function showComponentResult(elId, data, isError) {
+    const el = $(elId);
+    if (!el) return;
+    el.hidden = false;
+    el.className = `sql-result ${isError ? 'error' : 'ok'}`;
+    el.textContent = typeof data === 'string' ? data : JSON.stringify(data, null, 2);
+  }
+
+  async function applyComponent(kind, body, resultId) {
+    state.busy = true;
+    $('loading')?.classList.add('show');
+    try {
+      const res = await api(`/api/components/${kind}/apply`, {
+        method: 'POST',
+        body: JSON.stringify({ ...body, kind, slot: 'green', actor: state.user?.username || 'ops' }),
+      });
+      showComponentResult(resultId, res.output || res, false);
+      toast(`${kind.toUpperCase()} 已执行到绿环境`);
+      await loadComponentOpsHistory();
+      return res;
+    } catch (err) {
+      showComponentResult(resultId, err.message || String(err), true);
+      throw err;
+    } finally {
+      state.busy = false;
+      $('loading')?.classList.remove('show');
+    }
+  }
+
+  async function rollbackComponent(kind, resultId) {
+    if (!confirm(`确认回滚绿环境最近一次 ${kind.toUpperCase()} 操作？`)) return;
+    state.busy = true;
+    $('loading')?.classList.add('show');
+    try {
+      const res = await api(`/api/components/${kind}/rollback`, {
+        method: 'POST',
+        body: JSON.stringify({ slot: 'green', actor: state.user?.username || 'ops' }),
+      });
+      showComponentResult(resultId, res.output || res, false);
+      toast(`${kind.toUpperCase()} 回滚完成`);
+      await loadComponentOpsHistory();
+    } catch (err) {
+      showComponentResult(resultId, err.message || String(err), true);
+      toast(err.message || String(err), 'error');
+    } finally {
+      state.busy = false;
+      $('loading')?.classList.remove('show');
+    }
+  }
+
+  async function loadComponentOpsHistory() {
+    const el = $('componentOpsHistory');
+    if (!el) return;
+    try {
+      const list = await api('/api/components/all/history?slot=green');
+      if (!list.length) {
+        el.innerHTML = '<div class="empty">暂无记录</div>';
+        return;
+      }
+      el.innerHTML = list.map((op) => `
+        <div class="report-card">
+          <strong>${escapeHtml(op.kind)} · ${escapeHtml(op.status)}</strong>
+          <span>${new Date(op.created_at).toLocaleString()} · ${escapeHtml(op.actor)} · ${escapeHtml(op.action)}</span>
+          <span>${escapeHtml((op.output || '').slice(0, 200))}</span>
+        </div>`).join('');
+    } catch (err) {
+      el.innerHTML = `<div class="empty">加载失败：${escapeHtml(err.message || String(err))}</div>`;
+    }
+  }
+
+  async function execRedisOps() {
+    const payload = $('redisPayload')?.value.trim();
+    if (!payload) throw new Error('请填写 Redis 命令');
+    await applyComponent('redis', { payload, label: warValue('redisLabel'), action: 'apply' }, 'redisResult');
+  }
+
+  async function execNacosOps() {
+    const ref = warValue('nacosRef');
+    const payload = $('nacosPayload')?.value.trim();
+    if (!ref && !payload) throw new Error('请填写脚本路径或脚本内容');
+    await applyComponent('nacos', { ref, payload, label: warValue('nacosLabel'), action: 'apply' }, 'nacosResult');
+  }
+
+  async function execEsOps() {
+    const ref = warValue('esRef');
+    const payload = $('esPayload')?.value.trim();
+    if (!ref && !payload) throw new Error('请填写脚本路径或脚本内容');
+    await applyComponent('es', { ref, payload, label: warValue('esLabel'), action: 'apply' }, 'esResult');
+  }
+
+  async function execKafkaOps() {
+    const topic = warValue('kafkaTopic');
+    if (!topic) throw new Error('请填写 Topic 名称');
+    const partitions = warValue('kafkaPartitions') || '3';
+    await applyComponent('kafka', {
+      ref: topic,
+      node: partitions,
+      label: warValue('kafkaLabel'),
+      action: 'create-topic',
+    }, 'kafkaResult');
+  }
+
+  async function loadAdminUsers() {
+    if (!isAdmin()) {
+      toast('仅管理员可访问', 'error');
+      navigate('deploy');
+      return;
+    }
+    try {
+      state.adminUsers = await api('/api/admin/users');
+      renderAdminUsers();
+    } catch (err) {
+      $('userList').innerHTML = `<div class="empty">${escapeHtml(err.message || '加载失败')}</div>`;
+    }
+  }
+
+  function renderAdminUsers() {
+    const el = $('userList');
+    if (!el) return;
+    if (!state.adminUsers.length) {
+      el.innerHTML = '<div class="empty">暂无用户</div>';
+      return;
+    }
+    el.innerHTML = `
+      <table class="war-table">
+        <thead><tr><th>用户名</th><th>显示名</th><th>角色</th><th>创建时间</th><th>操作</th></tr></thead>
+        <tbody>${state.adminUsers.map((u) => `
+          <tr data-user="${escapeHtml(u.username)}">
+            <td>${escapeHtml(u.username)}</td>
+            <td><input class="user-display" value="${escapeHtml(u.display_name || '')}" /></td>
+            <td>
+              <select class="user-role">
+                <option value="normal" ${u.role === 'normal' ? 'selected' : ''}>普通</option>
+                <option value="admin" ${u.role === 'admin' ? 'selected' : ''}>管理员</option>
+              </select>
+            </td>
+            <td>${new Date(u.created_at).toLocaleString()}</td>
+            <td>
+              <button type="button" class="btn btn-ghost btn-save-user">保存</button>
+              <button type="button" class="btn btn-ghost btn-reset-user-pass">重置密码</button>
+              <button type="button" class="btn btn-ghost mini-danger btn-del-user">删除</button>
+            </td>
+          </tr>`).join('')}</tbody>
+      </table>`;
+    el.querySelectorAll('.btn-save-user').forEach((btn) => {
+      btn.addEventListener('click', () => saveAdminUser(btn.closest('tr')));
+    });
+    el.querySelectorAll('.btn-reset-user-pass').forEach((btn) => {
+      btn.addEventListener('click', () => resetAdminUserPass(btn.closest('tr')));
+    });
+    el.querySelectorAll('.btn-del-user').forEach((btn) => {
+      btn.addEventListener('click', () => deleteAdminUser(btn.closest('tr')));
+    });
+  }
+
+  async function saveAdminUser(row) {
+    const username = row?.dataset.user;
+    if (!username) return;
+    const displayName = row.querySelector('.user-display')?.value.trim();
+    const role = row.querySelector('.user-role')?.value || 'normal';
+    await api(`/api/admin/users/${encodeURIComponent(username)}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ display_name: displayName, role }),
+    });
+    toast('用户已更新');
+    await loadAdminUsers();
+  }
+
+  async function resetAdminUserPass(row) {
+    const username = row?.dataset.user;
+    const password = prompt(`为 ${username} 设置新密码（至少 8 位）`);
+    if (!password) return;
+    await api(`/api/admin/users/${encodeURIComponent(username)}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ password }),
+    });
+    toast('密码已重置');
+  }
+
+  async function deleteAdminUser(row) {
+    const username = row?.dataset.user;
+    if (!username || !confirm(`确认删除用户 ${username}？`)) return;
+    await api(`/api/admin/users/${encodeURIComponent(username)}`, { method: 'DELETE' });
+    toast('用户已删除');
+    await loadAdminUsers();
+  }
+
+  async function createAdminUser() {
+    const username = warValue('newUserName');
+    const password = $('newUserPass')?.value || '';
+    const displayName = warValue('newUserDisplay') || username;
+    const role = $('newUserRole')?.value || 'normal';
+    if (!username || !password) throw new Error('用户名和密码必填');
+    await api('/api/admin/users', {
+      method: 'POST',
+      body: JSON.stringify({ username, password, display_name: displayName, role }),
+    });
+    $('newUserName').value = '';
+    $('newUserPass').value = '';
+    $('newUserDisplay').value = '';
+    toast('用户创建成功');
+    await loadAdminUsers();
   }
 
   async function loadBlueTemplateIntoEditor() {
@@ -1435,13 +2643,31 @@
     return text;
   }
 
+  function formatSqlResult(res, okText) {
+    const lines = [okText];
+    if (res?.backup_path) lines.push(`执行前快照：${res.backup_path}`);
+    if (res?.restored) lines.push('失败恢复：已使用执行前快照恢复');
+    if (res?.output) lines.push('', res.output);
+    return lines.join('\n');
+  }
+
+  function formatSqlFailure(err) {
+    const data = err?.data || {};
+    const result = data.result;
+    const lines = [`✗ 执行失败`, formatSqlError(data.error || err?.message || String(err))];
+    if (result?.backup_path) lines.push('', `执行前快照：${result.backup_path}`);
+    if (result?.restored) lines.push('失败恢复：已使用执行前快照恢复');
+    if (result?.output) lines.push('', result.output);
+    return lines.join('\n');
+  }
+
   async function executeCustomSql() {
     if (state.busy) return;
     const sql = $('customSql').value.trim();
     if (!sql) { toast('请先填写 SQL', 'error'); return; }
     const actor = $('author').value.trim() || 'ops';
     const label = $('sqlLabel').value.trim() || 'custom';
-    if (!confirm(`确认将以下 SQL 执行到绿环境 MySQL？\n\n目标：osh-g-mysql / backstage\n\n此操作不可自动回滚。`)) return;
+    if (!confirm(`确认将以下 SQL 执行到绿环境 MySQL？\n\n目标：osh-g-mysql / backstage\n\n执行前会生成快照；失败会自动尝试恢复。`)) return;
 
     state.busy = true;
     $('loading').classList.add('show');
@@ -1454,12 +2680,12 @@
         body: JSON.stringify({ sql, actor, label }),
       });
       resultEl.hidden = false;
-      resultEl.textContent = `✓ 执行成功\n${res.output || ''}`;
+      resultEl.textContent = formatSqlResult(res, '✓ 执行成功');
       resultEl.className = 'sql-result ok';
       toast('SQL 已执行到绿库');
     } catch (err) {
       resultEl.hidden = false;
-      resultEl.textContent = `✗ 执行失败\n${formatSqlError(err.message || String(err))}`;
+      resultEl.textContent = formatSqlFailure(err);
       resultEl.className = 'sql-result err';
       toast(formatSqlError(err.message || String(err)).split('\n')[0], 'error');
     } finally {
@@ -1715,21 +2941,33 @@
   }
 
   async function completeApproval() {
-    const item = state.current.items[0];
-    if (!reviewsOK(item)) {
-      for (const reviewer of [item.reviewer1, item.reviewer2]) {
-        await api(`/api/items/${item.id}/reviews`, {
-          method: 'POST',
-          body: JSON.stringify({
-            reviewer, tested: true,
-            demo_seen: reviewer !== item.developer,
-            result: 'approve', comment: '通过',
-          }),
-        });
+    for (const item of state.current.items || []) {
+      if (!reviewsOK(item)) {
+        for (const reviewer of [item.reviewer1, item.reviewer2]) {
+          await api(`/api/items/${item.id}/reviews`, {
+            method: 'POST',
+            body: JSON.stringify({
+              reviewer, tested: true,
+              demo_seen: reviewer !== item.developer,
+              result: 'approve', comment: '通过',
+            }),
+          });
+        }
       }
     }
     state.current = await api(`/api/releases/${state.current.id}`);
     if (isBoss()) {
+      if (state.current.level === 'urgent') {
+        for (const item of state.current.items || []) {
+          if (!item.boss_approved) {
+            await api(`/api/items/${item.id}/boss-approve`, {
+              method: 'POST',
+              body: JSON.stringify({ reviewer: state.user.username, comment: '紧急上线逐项确认' }),
+            });
+          }
+        }
+        state.current = await api(`/api/releases/${state.current.id}`);
+      }
       state.current = await api(`/api/releases/${state.current.id}/boss-approve`, {
         method: 'POST',
         body: JSON.stringify({ reviewer: state.user.username, comment: '终审通过' }),
@@ -1741,6 +2979,17 @@
   }
 
   async function bossApproveOnly() {
+    if (state.current.level === 'urgent') {
+      for (const item of state.current.items || []) {
+        if (!item.boss_approved) {
+          await api(`/api/items/${item.id}/boss-approve`, {
+            method: 'POST',
+            body: JSON.stringify({ reviewer: state.user.username, comment: '紧急上线逐项确认' }),
+          });
+        }
+      }
+      state.current = await api(`/api/releases/${state.current.id}`);
+    }
     state.current = await api(`/api/releases/${state.current.id}/boss-approve`, {
       method: 'POST',
       body: JSON.stringify({ reviewer: state.user.username, comment: '终审通过' }),
@@ -1816,7 +3065,7 @@
       if (step === 1) await createRelease();
       else if (step === 2) await submitReview();
       else if (step === 3) {
-        if (reviewsOK(state.current.items?.[0]) && isBoss()) await bossApproveOnly();
+        if (allReviewsOK(state.current.items) && isBoss()) await bossApproveOnly();
         else await completeApproval();
       }
       else if (step === 4) {
@@ -1871,6 +3120,7 @@
       await loadHealth();
       await loadTraffic();
       await loadActiveDeploy();
+      await loadComponentSyncActive();
       await loadSqlTemplates();
       await loadDeploySnapshots();
       const list = await api('/api/releases');
@@ -1897,8 +3147,12 @@
 
   async function boot() {
     // Login handlers first — must work even if sidebar/DOM init fails (e.g. cached old HTML)
-    $('btnLogin')?.addEventListener('click', login);
-    $('loginPass')?.addEventListener('keydown', (e) => { if (e.key === 'Enter') login(); });
+    renderAuthMode();
+    $('btnLogin')?.addEventListener('click', submitAuth);
+    $('btnAuthSwitch')?.addEventListener('click', toggleAuthMode);
+    ['loginUser', 'loginPass', 'registerDisplayName', 'registerPass2'].forEach((id) => {
+      $(id)?.addEventListener('keydown', (e) => { if (e.key === 'Enter') submitAuth(); });
+    });
     $('btnLogout')?.addEventListener('click', logout);
 
     try {
@@ -1912,6 +3166,20 @@
     $('btnRollbackBlue')?.addEventListener('click', () => rollbackDeploy('blue'));
     $('btnCancelDeploy')?.addEventListener('click', () => cancelDeployRelease(state.current));
     $('btnCancelBlueDeploy')?.addEventListener('click', () => cancelDeployRelease(state.currentBlue));
+    $('btnAddChangeItem')?.addEventListener('click', addWarItem);
+    $('btnCreateWarRelease')?.addEventListener('click', () => {
+      createWarRelease().catch((err) => toast(err.message || String(err), 'error'));
+    });
+    document.querySelectorAll('[data-component-tab]').forEach((btn) => {
+      btn.addEventListener('click', () => selectWarComponent(btn.dataset.componentTab));
+    });
+    renderWarComponentPicker();
+    document.querySelectorAll('[data-war-view]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        state.warRoom.view = btn.dataset.warView || 'table';
+        renderWarRoom();
+      });
+    });
     $('mainBtn')?.addEventListener('click', handleMainAction);
     $('btnNewDeploy')?.addEventListener('click', resetDeploy);
     $('blueMainBtn')?.addEventListener('click', handleBlueMainAction);
@@ -1923,6 +3191,50 @@
     $('btnToGreen')?.addEventListener('click', () => switchTraffic('green'));
     $('btnToBlue')?.addEventListener('click', () => switchTraffic('blue'));
     $('btnSyncBlue')?.addEventListener('click', syncBlue);
+    $('btnSyncGreenAll')?.addEventListener('click', syncGreenAllComponents);
+    document.querySelectorAll('[data-ops-tab]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        renderComponentOpsTab(btn.dataset.opsTab);
+      });
+    });
+    $('btnFillMysqlTest')?.addEventListener('click', () => fillComponentTestCase('mysql'));
+    $('btnFillRedisTest')?.addEventListener('click', () => fillComponentTestCase('redis'));
+    $('btnFillNacosTest')?.addEventListener('click', () => fillComponentTestCase('nacos'));
+    $('btnFillEsTest')?.addEventListener('click', () => fillComponentTestCase('es'));
+    $('btnFillKafkaTest')?.addEventListener('click', () => fillComponentTestCase('kafka'));
+    $('btnFillAllComponentTests')?.addEventListener('click', fillAllComponentTestCases);
+    $('btnQueueMysql')?.addEventListener('click', () => {
+      try { queueComponentItem('mysql'); } catch (e) { toast(e.message, 'error'); }
+    });
+    $('btnQueueRedis')?.addEventListener('click', () => {
+      try { queueComponentItem('redis'); } catch (e) { toast(e.message, 'error'); }
+    });
+    $('btnQueueNacos')?.addEventListener('click', () => {
+      try { queueComponentItem('nacos'); } catch (e) { toast(e.message, 'error'); }
+    });
+    $('btnQueueEs')?.addEventListener('click', () => {
+      try { queueComponentItem('es'); } catch (e) { toast(e.message, 'error'); }
+    });
+    $('btnQueueKafka')?.addEventListener('click', () => {
+      try { queueComponentItem('kafka'); } catch (e) { toast(e.message, 'error'); }
+    });
+    $('btnClearComponentQueue')?.addEventListener('click', () => {
+      state.componentOpsQueue = [];
+      renderComponentOpsQueue();
+    });
+    $('btnExecComponentBatch')?.addEventListener('click', () => {
+      execComponentBatch().catch((e) => toast(e.message || String(e), 'error'));
+    });
+    $('btnExecRedis')?.addEventListener('click', () => execRedisOps().catch((e) => toast(e.message, 'error')));
+    $('btnExecNacos')?.addEventListener('click', () => execNacosOps().catch((e) => toast(e.message, 'error')));
+    $('btnExecEs')?.addEventListener('click', () => execEsOps().catch((e) => toast(e.message, 'error')));
+    $('btnExecKafka')?.addEventListener('click', () => execKafkaOps().catch((e) => toast(e.message, 'error')));
+    $('btnRollbackMysql')?.addEventListener('click', () => rollbackComponent('mysql', 'sqlResult'));
+    $('btnRollbackRedis')?.addEventListener('click', () => rollbackComponent('redis', 'redisResult'));
+    $('btnRollbackNacos')?.addEventListener('click', () => rollbackComponent('nacos', 'nacosResult'));
+    $('btnRollbackEs')?.addEventListener('click', () => rollbackComponent('es', 'esResult'));
+    $('btnRollbackKafka')?.addEventListener('click', () => rollbackComponent('kafka', 'kafkaResult'));
+    $('btnCreateUser')?.addEventListener('click', () => createAdminUser().catch((e) => toast(e.message, 'error')));
     if (await restoreSession()) {
       await bootApp();
     }

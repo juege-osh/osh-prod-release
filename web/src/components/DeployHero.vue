@@ -38,13 +38,13 @@ const ringStatus = computed(() => {
     <div class="hero-grid">
       <div class="hero-left">
         <div class="eyebrow">
-          <NTag size="small" :bordered="false" type="success">25 → 149 绿</NTag>
-          <NTag size="small" :bordered="false" type="info">不动蓝项目</NTag>
+          <NTag size="small" :bordered="false" type="success">Green First</NTag>
+          <NTag size="small" :bordered="false" type="info">蓝绿安全边界</NTag>
           <NTag v-if="mockMode" size="small" :bordered="false" type="warning">演示模式</NTag>
         </div>
-        <h1>OSH 一键部署绿环境</h1>
+        <h1>待命槽位部署控制</h1>
         <p class="subtitle">
-          25 备份上传网盘 → 149 下载并更新<strong>绿环境</strong>前后端（:28080）→ HTTP 验收
+          先部署<strong>绿环境</strong>，通过自动化测试和人工复测后再切流；蓝环境只在绿生产稳定后同步。
         </p>
         <p v-if="greenUrl" class="hint">
           部署后访问：<a :href="greenUrl" target="_blank" rel="noopener">{{ greenUrl }}</a>
@@ -67,10 +67,10 @@ const ringStatus = computed(() => {
             <template #trigger>
               <NButton type="primary" size="large" :loading="busy" :disabled="busy" class="cta">
                 <template #icon><NIcon :component="RocketOutline" /></template>
-                一键部署绿环境
+                部署绿环境
               </NButton>
             </template>
-            将执行：25 备份上传网盘 → 149 下载并部署到绿环境（不修改蓝项目 /opt/osh）
+            将执行当前配置的绿环境部署流程，不修改蓝项目 /opt/osh。
           </NPopconfirm>
           <NPopconfirm @positive-click="$emit('start', 'skip_backup')">
             <template #trigger>

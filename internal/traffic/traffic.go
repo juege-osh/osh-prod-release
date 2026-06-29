@@ -73,6 +73,25 @@ func (s *Service) RequireProductionGreen(ctx context.Context) error {
 	return nil
 }
 
+func (s *Service) RequireProductionBlue(ctx context.Context) error {
+	st, err := s.Status(ctx)
+	if err != nil {
+		return err
+	}
+	if st.Active != "blue" {
+		label := "未知"
+		if st.Active == "green" {
+			label = "绿"
+		} else if st.Active == "unknown" {
+			label = "未知"
+		} else {
+			label = st.Active
+		}
+		return fmt.Errorf("当前生产流量在%s环境（:80），仅当生产在蓝环境时才能同步蓝到绿", label)
+	}
+	return nil
+}
+
 func (s *Service) guardNoActiveDeploy(ctx context.Context) error {
 	active, err := s.store.GetActiveDeployingRelease(ctx)
 	if err != nil {

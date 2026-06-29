@@ -3,7 +3,9 @@ package ssh
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -37,18 +39,70 @@ func (c *Client) Run(ctx context.Context, remoteCmd string, timeout time.Duratio
 	if c.cfg.ProdSSHPassword == "" {
 		return "", fmt.Errorf("PROD_PASSWORD required for remote SSH mode (set PROD_EXEC_MODE=local on prod host or configure password)")
 	}
-	args := []string{
-		"-p", c.cfg.ProdSSHPassword,
-		"ssh",
+
+	_ = os.MkdirAll(c.cfg.DataDir, 0o755)
+	controlPath := filepath.Join(c.cfg.DataDir, "ssh-control-%r@%h:%p")
+
+	sshArgs := []string{
 		"-o", "StrictHostKeyChecking=no",
-		"-o", "ConnectTimeout=15",
+		"-o", "ConnectTimeout=30",
+		"-o", "ServerAliveInterval=15",
+		"-o", "ServerAliveCountMax=4",
+		"-o", "ControlMaster=auto",
+		"-o", "ControlPersist=600",
+		"-o", fmt.Sprintf("ControlPath=%s", controlPath),
 		"-p", fmt.Sprintf("%d", c.cfg.ProdSSHPort),
 		fmt.Sprintf("%s@%s", c.cfg.ProdSSHUser, c.cfg.ProdSSHHost),
 		remoteCmd,
 	}
-	cmd := exec.CommandContext(ctx, "sshpass", args...)
-	out, err := cmd.CombinedOutput()
+	args := append([]string{"-p", c.cfg.ProdSSHPassword, "ssh"}, sshArgs...)
+
+	maxAttempts := 3
+	var out []byte
+	var err error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		cmd := exec.CommandContext(ctx, "sshpass", args...)
+		out, err = cmd.CombinedOutput()
+		if err == nil {
+			return strings.TrimSpace(string(out)), nil
+		}
+		if attempt >= maxAttempts-1 || !isRetryableSSH(err, out) {
+			break
+		}
+		delay := retryDelay(out, attempt)
+		select {
+		case <-ctx.Done():
+			return strings.TrimSpace(string(out)), ctx.Err()
+		case <-time.After(delay):
+		}
+	}
 	return strings.TrimSpace(string(out)), err
+}
+
+func retryDelay(out []byte, attempt int) time.Duration {
+	if isAuthFailure(out) {
+		// 149 often rate-limits repeated password auth; back off longer.
+		return time.Duration(6+attempt*4) * time.Second
+	}
+	return 2 * time.Second
+}
+
+func isRetryableSSH(err error, out []byte) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error() + "\n" + string(out)
+	return strings.Contains(s, "Connection reset") ||
+		strings.Contains(s, "kex_exchange_identification") ||
+		strings.Contains(s, "Connection refused") ||
+		strings.Contains(s, "Operation timed out") ||
+		isAuthFailure(out)
+}
+
+func isAuthFailure(out []byte) bool {
+	s := string(out)
+	return strings.Contains(s, "Permission denied") ||
+		strings.Contains(s, "Too many authentication failures")
 }
 
 func (c *Client) SwitchToGreen(ctx context.Context) (string, error) {
@@ -91,6 +145,16 @@ func (c *Client) SyncGreenToBlue(ctx context.Context) (string, error) {
 		script = "/opt/osh-green/005-scripts/osh-prod-standby-sync.sh"
 	}
 	return c.Run(ctx, fmt.Sprintf("bash %s --green-to-blue", script), 45*time.Minute)
+}
+
+func (c *Client) SyncBlueToGreenAllComponents(ctx context.Context) (string, error) {
+	script := c.cfg.BlueToGreenAllSyncScript
+	if script == "" {
+		script = "/opt/osh-green/005-scripts/run-incremental-blue-to-green-all-components.sh"
+	}
+	return c.Run(ctx,
+		fmt.Sprintf("flock -xn /opt/osh-green/004-log/osh/sync/incremental-blue-to-green-all.lock -c %s", script),
+		90*time.Minute)
 }
 
 // WaitGreenAPI polls green nginx /api/ until 200 or 401 (post GHA deploy).

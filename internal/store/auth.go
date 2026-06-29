@@ -25,6 +25,30 @@ func (s *Store) EnsureUser(ctx context.Context, username, passwordHash string, r
 	return err
 }
 
+func (s *Store) CreateUser(ctx context.Context, username, passwordHash string, role models.UserRole, displayName string) error {
+	if displayName == "" {
+		displayName = username
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO users (username, password_hash, role, display_name, created_at)
+		VALUES (?, ?, ?, ?, ?)`,
+		username, passwordHash, string(role), displayName, now)
+	return err
+}
+
+func (s *Store) UserExists(ctx context.Context, username string) (bool, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT 1 FROM users WHERE username = ?`, username)
+	var one int
+	if err := row.Scan(&one); err != nil {
+		if err == sql.ErrNoRows {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
 func (s *Store) GetUserByUsername(ctx context.Context, username string) (*models.UserRecord, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT username, password_hash, role, display_name, created_at

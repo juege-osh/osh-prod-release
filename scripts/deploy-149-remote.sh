@@ -18,7 +18,7 @@ if [[ ! -d "$STAGING/bin" ]]; then
   exit 1
 fi
 
-mkdir -p "$DEPLOY_DIR"/{bin,data,logs}
+mkdir -p "$DEPLOY_DIR"/{bin,data,logs,scripts}
 
 if [[ ! -f "$DEPLOY_DIR/config.env" ]]; then
   if [[ -f "$STAGING/config.env.149.example" ]]; then
@@ -38,6 +38,11 @@ fi
 
 if [[ -d "$STAGING/components" ]]; then
   rsync -a "$STAGING/components/" "$DEPLOY_DIR/components/"
+fi
+
+if [[ -d "$STAGING/scripts" ]]; then
+  rsync -a --delete "$STAGING/scripts/" "$DEPLOY_DIR/scripts/"
+  chmod +x "$DEPLOY_DIR"/scripts/*.sh 2>/dev/null || true
 fi
 
 if [[ -f "$STAGING/deploy/systemd/osh-prod-release.service" ]]; then
