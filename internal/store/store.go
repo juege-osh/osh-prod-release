@@ -41,8 +41,50 @@ func Open(sqlitePath string) (*Store, error) {
 		return nil, err
 	}
 	// migrate existing DBs
-	_, _ = db.Exec(`ALTER TABLE releases ADD COLUMN deploy_target TEXT NOT NULL DEFAULT 'green'`)
-	return &Store{db: db}, nil
+	for _, stmt := range []string{
+		`ALTER TABLE releases ADD COLUMN deploy_target TEXT NOT NULL DEFAULT 'green'`,
+		`ALTER TABLE change_items ADD COLUMN component TEXT`,
+		`ALTER TABLE change_items ADD COLUMN component_type TEXT DEFAULT 'application'`,
+		`ALTER TABLE change_items ADD COLUMN action TEXT DEFAULT 'apply'`,
+		`ALTER TABLE change_items ADD COLUMN target_slot TEXT DEFAULT 'green'`,
+		`ALTER TABLE change_items ADD COLUMN target_node TEXT`,
+		`ALTER TABLE change_items ADD COLUMN impact_scope TEXT`,
+		`ALTER TABLE change_items ADD COLUMN deploy_order INTEGER DEFAULT 100`,
+		`ALTER TABLE change_items ADD COLUMN precondition TEXT`,
+		`ALTER TABLE change_items ADD COLUMN node_strategy TEXT`,
+		`ALTER TABLE change_items ADD COLUMN data_strategy TEXT`,
+		`ALTER TABLE change_items ADD COLUMN rollback_strategy TEXT`,
+		`ALTER TABLE change_items ADD COLUMN test_plan TEXT`,
+		`ALTER TABLE change_items ADD COLUMN ai_check TEXT`,
+		`ALTER TABLE change_items ADD COLUMN accountability TEXT`,
+		`ALTER TABLE change_items ADD COLUMN data_impact TEXT`,
+		`ALTER TABLE change_items ADD COLUMN conflict_owners TEXT`,
+		`ALTER TABLE change_items ADD COLUMN notify_emails TEXT`,
+		`ALTER TABLE change_items ADD COLUMN notify_status TEXT`,
+		`ALTER TABLE change_items ADD COLUMN boss_approved INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE change_items ADD COLUMN boss_approved_by TEXT`,
+		`ALTER TABLE change_items ADD COLUMN boss_approved_at TEXT`,
+		`CREATE TABLE IF NOT EXISTS component_direct_ops (
+			id TEXT PRIMARY KEY,
+			kind TEXT NOT NULL,
+			slot TEXT NOT NULL DEFAULT 'green',
+			action TEXT NOT NULL,
+			ref_path TEXT,
+			node TEXT,
+			work_release TEXT NOT NULL,
+			work_item TEXT NOT NULL,
+			actor TEXT NOT NULL,
+			status TEXT NOT NULL,
+			output TEXT,
+			created_at TEXT NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_component_direct_ops_kind ON component_direct_ops(kind, slot, created_at)`,
+	} {
+		_, _ = db.Exec(stmt)
+	}
+	st := &Store{db: db}
+	_ = st.SeedDefaultComponentSpecs(context.Background())
+	return st, nil
 }
 
 func (s *Store) Close() error {
@@ -78,13 +120,24 @@ func (s *Store) CreateRelease(ctx context.Context, req models.CreateReleaseReque
 	for _, it := range req.Items {
 		itemID := uuid.New().String()[:12]
 		demoRequired := it.Developer == it.Reviewer1 || it.Developer == it.Reviewer2
+		deployOrder := it.DeployOrder
+		if deployOrder <= 0 {
+			deployOrder = 100
+		}
 		_, err = tx.ExecContext(ctx, `
 			INSERT INTO change_items (id, release_id, title, type, ref, developer, expected_impact,
-				status, reviewer1, reviewer2, demo_required, created_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				component, component_type, action, target_slot, target_node, impact_scope, deploy_order,
+				precondition, node_strategy, data_strategy, rollback_strategy, test_plan, ai_check,
+				accountability, data_impact, conflict_owners, notify_emails, notify_status, status,
+				reviewer1, reviewer2, demo_required, created_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			itemID, id, it.Title, it.Type, it.Ref, it.Developer, it.ExpectedImpact,
-			models.ItemStatusPending, it.Reviewer1, it.Reviewer2, boolToInt(demoRequired),
-			now.Format(time.RFC3339))
+			it.Component, defaultStr(it.ComponentType, "application"), defaultStr(it.Action, "apply"),
+			defaultStr(it.TargetSlot, "green"), it.TargetNode, it.ImpactScope, deployOrder,
+			it.Precondition, it.NodeStrategy, it.DataStrategy, it.RollbackStrategy, it.TestPlan,
+			it.AICheck, it.Accountability, it.DataImpact, it.ConflictOwners, it.NotifyEmails,
+			defaultStr(it.NotifyStatus, "pending"), models.ItemStatusPending, it.Reviewer1, it.Reviewer2,
+			boolToInt(demoRequired), now.Format(time.RFC3339))
 		if err != nil {
 			return nil, err
 		}
@@ -208,8 +261,12 @@ func scanRelease(row interface{ Scan(...any) error }) (*models.Release, error) {
 
 func (s *Store) listItems(ctx context.Context, releaseID string) ([]models.ChangeItem, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, release_id, title, type, ref, developer, expected_impact, status,
-			reviewer1, reviewer2, demo_required, created_at
+		SELECT id, release_id, title, type, ref, developer, expected_impact,
+			component, component_type, action, target_slot, target_node, impact_scope, deploy_order,
+			precondition, node_strategy, data_strategy, rollback_strategy, test_plan, ai_check,
+			accountability, data_impact, conflict_owners, notify_emails, notify_status,
+			boss_approved, boss_approved_by, boss_approved_at, status, reviewer1, reviewer2,
+			demo_required, created_at
 		FROM change_items WHERE release_id = ? ORDER BY created_at`, releaseID)
 	if err != nil {
 		return nil, err
@@ -217,44 +274,97 @@ func (s *Store) listItems(ctx context.Context, releaseID string) ([]models.Chang
 	defer rows.Close()
 	var items []models.ChangeItem
 	for rows.Next() {
-		var it models.ChangeItem
-		var demo int
-		var created string
-		if err := rows.Scan(&it.ID, &it.ReleaseID, &it.Title, &it.Type, &it.Ref, &it.Developer,
-			&it.ExpectedImpact, &it.Status, &it.Reviewer1, &it.Reviewer2, &demo, &created); err != nil {
+		it, err := scanChangeItem(rows)
+		if err != nil {
 			return nil, err
 		}
-		it.DemoRequired = demo == 1
-		it.CreatedAt, _ = time.Parse(time.RFC3339, created)
 		reviews, err := s.listReviews(ctx, it.ID)
 		if err != nil {
 			return nil, err
 		}
 		it.Reviews = reviews
-		items = append(items, it)
+		items = append(items, *it)
 	}
 	return items, rows.Err()
 }
 
 func (s *Store) GetItem(ctx context.Context, itemID string) (*models.ChangeItem, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, release_id, title, type, ref, developer, expected_impact, status,
-			reviewer1, reviewer2, demo_required, created_at
+		SELECT id, release_id, title, type, ref, developer, expected_impact,
+			component, component_type, action, target_slot, target_node, impact_scope, deploy_order,
+			precondition, node_strategy, data_strategy, rollback_strategy, test_plan, ai_check,
+			accountability, data_impact, conflict_owners, notify_emails, notify_status,
+			boss_approved, boss_approved_by, boss_approved_at, status, reviewer1, reviewer2,
+			demo_required, created_at
 		FROM change_items WHERE id = ?`, itemID)
-	var it models.ChangeItem
-	var demo int
-	var created string
-	if err := row.Scan(&it.ID, &it.ReleaseID, &it.Title, &it.Type, &it.Ref, &it.Developer,
-		&it.ExpectedImpact, &it.Status, &it.Reviewer1, &it.Reviewer2, &demo, &created); err != nil {
+	it, err := scanChangeItem(row)
+	if err != nil {
 		return nil, err
 	}
-	it.DemoRequired = demo == 1
-	it.CreatedAt, _ = time.Parse(time.RFC3339, created)
 	reviews, err := s.listReviews(ctx, it.ID)
 	if err != nil {
 		return nil, err
 	}
 	it.Reviews = reviews
+	return it, nil
+}
+
+func scanChangeItem(row interface{ Scan(...any) error }) (*models.ChangeItem, error) {
+	var it models.ChangeItem
+	var demo, bossApproved int
+	var deployOrder sql.NullInt64
+	var component, componentType, action, targetSlot, targetNode, impactScope, precondition sql.NullString
+	var nodeStrategy, dataStrategy, rollbackStrategy, testPlan, aiCheck, accountability sql.NullString
+	var dataImpact, conflictOwners, notifyEmails, notifyStatus sql.NullString
+	var bossBy, bossAt sql.NullString
+	var created string
+	if err := row.Scan(&it.ID, &it.ReleaseID, &it.Title, &it.Type, &it.Ref, &it.Developer,
+		&it.ExpectedImpact, &component, &componentType, &action, &targetSlot, &targetNode,
+		&impactScope, &deployOrder, &precondition, &nodeStrategy, &dataStrategy, &rollbackStrategy,
+		&testPlan, &aiCheck, &accountability, &dataImpact, &conflictOwners, &notifyEmails,
+		&notifyStatus, &bossApproved, &bossBy, &bossAt, &it.Status, &it.Reviewer1,
+		&it.Reviewer2, &demo, &created); err != nil {
+		return nil, err
+	}
+	it.Component = component.String
+	it.ComponentType = componentType.String
+	if it.ComponentType == "" {
+		it.ComponentType = "application"
+	}
+	it.Action = action.String
+	if it.Action == "" {
+		it.Action = "apply"
+	}
+	it.TargetSlot = targetSlot.String
+	if it.TargetSlot == "" {
+		it.TargetSlot = "green"
+	}
+	it.TargetNode = targetNode.String
+	it.ImpactScope = impactScope.String
+	if deployOrder.Valid {
+		it.DeployOrder = int(deployOrder.Int64)
+	}
+	it.Precondition = precondition.String
+	it.NodeStrategy = nodeStrategy.String
+	it.DataStrategy = dataStrategy.String
+	it.RollbackStrategy = rollbackStrategy.String
+	it.TestPlan = testPlan.String
+	it.AICheck = aiCheck.String
+	it.Accountability = accountability.String
+	it.DataImpact = dataImpact.String
+	it.ConflictOwners = conflictOwners.String
+	it.NotifyEmails = notifyEmails.String
+	it.NotifyStatus = notifyStatus.String
+	it.BossApproved = bossApproved == 1
+	if bossBy.Valid {
+		it.BossApprovedBy = bossBy.String
+	}
+	if bossAt.Valid {
+		t, _ := time.Parse(time.RFC3339, bossAt.String)
+		it.BossApprovedAt = &t
+	}
+	it.DemoRequired = demo == 1
+	it.CreatedAt, _ = time.Parse(time.RFC3339, created)
 	return &it, nil
 }
 
@@ -312,6 +422,15 @@ func (s *Store) SetBossApproved(ctx context.Context, id, reviewer string) error 
 		UPDATE releases SET boss_approved = 1, boss_approved_by = ?, boss_approved_at = ?,
 			status = ?, updated_at = ? WHERE id = ?`,
 		reviewer, now, models.StatusApproved, now, id)
+	return err
+}
+
+func (s *Store) SetItemBossApproved(ctx context.Context, itemID, reviewer string) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE change_items SET boss_approved = 1, boss_approved_by = ?, boss_approved_at = ?
+		WHERE id = ?`,
+		reviewer, now, itemID)
 	return err
 }
 
@@ -436,6 +555,13 @@ func boolToInt(b bool) int {
 		return 1
 	}
 	return 0
+}
+
+func defaultStr(v, fallback string) string {
+	if strings.TrimSpace(v) == "" {
+		return fallback
+	}
+	return v
 }
 
 func (s *Store) GetActiveDeployingRelease(ctx context.Context) (*models.Release, error) {

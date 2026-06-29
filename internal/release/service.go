@@ -4,12 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sync"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/juege/osh-prod-release/internal/approval"
+	"github.com/juege/osh-prod-release/internal/component"
 	"github.com/juege/osh-prod-release/internal/config"
 	"github.com/juege/osh-prod-release/internal/github"
 	"github.com/juege/osh-prod-release/internal/models"
@@ -20,28 +21,35 @@ import (
 )
 
 type Service struct {
-	cfg      *config.Config
-	store    *store.Store
-	approval *approval.Engine
-	ssh      *ssh.Client
-	test     *testrunner.Runner
-	artifact *github.ArtifactService
-	deployGH *github.DeployTrigger
-	traffic  *traffic.Service
-	mu       sync.Mutex
-	jobs     deployJobRegistry
+	cfg       *config.Config
+	store     *store.Store
+	approval  *approval.Engine
+	ssh       *ssh.Client
+	test      *testrunner.Runner
+	component *component.Service
+	artifact  *github.ArtifactService
+	deployGH  *github.DeployTrigger
+	traffic   *traffic.Service
+	mu        sync.Mutex
+	jobs      deployJobRegistry
+}
+
+type componentAppliedItem struct {
+	item models.ChangeItem
+	ex   component.Executor
 }
 
 func New(cfg *config.Config, st *store.Store, trafficSvc *traffic.Service) *Service {
 	return &Service{
-		cfg:      cfg,
-		store:    st,
-		approval: approval.New(cfg.BossReviewer),
-		ssh:      ssh.New(cfg),
-		test:     testrunner.New(cfg),
-		artifact: github.New(cfg),
-		deployGH: github.NewDeployTrigger(cfg),
-		traffic:  trafficSvc,
+		cfg:       cfg,
+		store:     st,
+		approval:  approval.New(cfg.BossReviewer),
+		ssh:       ssh.New(cfg),
+		test:      testrunner.New(cfg),
+		component: component.NewService(cfg, ssh.New(cfg)),
+		artifact:  github.New(cfg),
+		deployGH:  github.NewDeployTrigger(cfg),
+		traffic:   trafficSvc,
 	}
 }
 
@@ -159,12 +167,46 @@ func (s *Service) BossApprove(ctx context.Context, id string, req models.BossApp
 	if !ok {
 		return nil, fmt.Errorf(msg)
 	}
+	if s.approval.NeedsPerItemBossApproval(rel.Level) {
+		if ok, msg := s.approval.AllItemsBossApprovalOK(rel.Items); !ok {
+			return nil, fmt.Errorf(msg)
+		}
+	}
 	if err := s.store.SetBossApproved(ctx, id, req.Reviewer); err != nil {
 		return nil, err
 	}
 	_ = s.store.UpdateStep(ctx, id, "boss_approve", "success", req.Comment)
 	_ = s.store.AddAudit(ctx, req.Reviewer, "boss_approve", id, req.Comment)
 	return s.store.GetRelease(ctx, id)
+}
+
+func (s *Service) BossApproveItem(ctx context.Context, itemID string, req models.ItemBossApproveRequest, actorIsBoss bool) (*models.Release, error) {
+	if !actorIsBoss {
+		boss := s.cfg.BossReviewer
+		if boss == "" {
+			boss = "juege"
+		}
+		return nil, fmt.Errorf("仅 %s 可逐项确认紧急上线项", boss)
+	}
+	item, err := s.store.GetItem(ctx, itemID)
+	if err != nil {
+		return nil, err
+	}
+	rel, err := s.store.GetRelease(ctx, item.ReleaseID)
+	if err != nil {
+		return nil, err
+	}
+	if !s.approval.NeedsPerItemBossApproval(rel.Level) {
+		return nil, fmt.Errorf("常规上线不需要逐项觉哥确认")
+	}
+	if req.Reviewer == "" {
+		req.Reviewer = s.cfg.BossReviewer
+	}
+	if err := s.store.SetItemBossApproved(ctx, itemID, req.Reviewer); err != nil {
+		return nil, err
+	}
+	_ = s.store.AddAudit(ctx, req.Reviewer, "boss_approve_item", itemID, req.Comment)
+	return s.store.GetRelease(ctx, item.ReleaseID)
 }
 
 func (s *Service) GetActiveDeploy(ctx context.Context) (*models.Release, error) {
@@ -368,6 +410,15 @@ func (s *Service) executeDeploy(ctx context.Context, id, actor string) {
 		_ = s.store.UpdateReleaseStatus(ctx, id, models.StatusFailed)
 		return
 	}
+	if target == "green" {
+		if compOut, compErr := s.executeComponentChanges(ctx, *rel, "green", actor); compErr != nil {
+			_ = s.store.UpdateStep(ctx, id, "deploy_standby", "failed", compErr.Error())
+			_ = s.store.UpdateReleaseStatus(ctx, id, models.StatusFailed)
+			return
+		} else if compOut != "" {
+			out = out + "; components: " + compOut
+		}
+	}
 	_ = s.store.UpdateStep(ctx, id, "deploy_standby", "success", out)
 	_ = s.store.AddAudit(ctx, actor, "deploy_standby", id, out)
 
@@ -454,6 +505,192 @@ func (s *Service) executeBlueDeploy(ctx context.Context, id string) (string, err
 	return out, errDeploy
 }
 
+func (s *Service) executeComponentChanges(ctx context.Context, rel models.Release, slot, actor string) (string, error) {
+	if s.component == nil {
+		return "", nil
+	}
+	var parts []string
+	var applied []componentAppliedItem
+	for _, item := range component.SortItems(rel.Items) {
+		ex := s.component.ExecutorFor(item)
+		if ex == nil {
+			continue
+		}
+		plan, err := ex.Plan(ctx, rel, item)
+		if err != nil {
+			return strings.Join(parts, "; "), err
+		}
+		exec, err := s.store.UpsertChangeExecution(ctx, models.ChangeExecution{
+			ReleaseID: rel.ID,
+			ItemID:    item.ID,
+			Slot:      slot,
+			Component: plan.Component,
+			Action:    plan.Action,
+			Node:      plan.Node,
+			Status:    "planned",
+			PlanJSON:  component.MarshalResult(plan),
+			StartedAt: time.Now().UTC(),
+		})
+		if err != nil {
+			return strings.Join(parts, "; "), err
+		}
+
+		snap, err := ex.Snapshot(ctx, rel, item, slot)
+		if err != nil {
+			s.finishComponentExecution(ctx, exec, "failed", snap.Output, err.Error())
+			return strings.Join(parts, "; "), err
+		}
+		_ = s.store.SaveRollbackSnapshot(ctx, models.RollbackSnapshot{
+			ReleaseID:    rel.ID,
+			ItemID:       item.ID,
+			Slot:         slot,
+			Component:    snap.Component,
+			SnapshotType: string(snap.Phase),
+			MetadataJSON: component.MarshalResult(snap),
+		})
+
+		var apply component.Result
+		if slot == "blue" {
+			apply, err = ex.ApplyBlue(ctx, rel, item)
+		} else {
+			apply, err = ex.ApplyGreen(ctx, rel, item)
+		}
+		if err != nil {
+			s.finishComponentExecution(ctx, exec, "failed", apply.Output, err.Error())
+			s.rollbackAppliedComponents(ctx, rel, slot, actor, applied)
+			return strings.Join(parts, "; "), err
+		}
+		applied = append(applied, componentAppliedItem{item: item, ex: ex})
+
+		test, err := ex.Test(ctx, rel, item, slot)
+		if err != nil {
+			s.finishComponentExecution(ctx, exec, "failed", test.Output, err.Error())
+			s.rollbackAppliedComponents(ctx, rel, slot, actor, applied)
+			return strings.Join(parts, "; "), err
+		}
+		_ = s.store.SaveComponentTestReport(ctx, models.ComponentTestReport{
+			ReleaseID:      rel.ID,
+			ItemID:         item.ID,
+			Slot:           slot,
+			Component:      test.Component,
+			FunctionalJSON: component.MarshalResult(test),
+			DataDiffJSON:   component.MarshalResult(apply),
+			AIVerdict:      componentVerdict(item, test, apply),
+			Passed:         test.Status != "failed" && apply.Status != "failed",
+		})
+		finished := time.Now().UTC()
+		exec.Status = "success"
+		exec.Output = apply.Output
+		exec.FinishedAt = &finished
+		_, _ = s.store.UpsertChangeExecution(ctx, exec)
+		_ = s.store.UpdateItemStatus(ctx, item.ID, models.ItemStatusDeployed)
+		parts = append(parts, fmt.Sprintf("%s/%s:%s", slot, test.Component, test.Status))
+		_ = s.store.AddAudit(ctx, actor, "component_change_"+slot, item.ID, component.MarshalResult(apply))
+	}
+	return strings.Join(parts, "; "), nil
+}
+
+func (s *Service) rollbackAppliedComponents(ctx context.Context, rel models.Release, slot, actor string, applied []componentAppliedItem) {
+	for i := len(applied) - 1; i >= 0; i-- {
+		entry := applied[i]
+		var res component.Result
+		var err error
+		if slot == "blue" {
+			res, err = entry.ex.RollbackBlue(ctx, rel, entry.item)
+		} else {
+			res, err = entry.ex.RollbackGreen(ctx, rel, entry.item)
+		}
+		detail := component.MarshalResult(res)
+		if err != nil {
+			detail = detail + "; rollback_error=" + err.Error()
+		}
+		_ = s.store.AddAudit(ctx, actor, "component_rollback_"+slot, entry.item.ID, detail)
+	}
+}
+
+func (s *Service) RollbackItem(ctx context.Context, itemID, slot, actor string) (component.Result, error) {
+	if slot == "" {
+		slot = "green"
+	}
+	if slot != "green" && slot != "blue" {
+		return component.Result{}, fmt.Errorf("rollback slot must be green or blue")
+	}
+	item, err := s.store.GetItem(ctx, itemID)
+	if err != nil {
+		return component.Result{}, err
+	}
+	rel, err := s.store.GetRelease(ctx, item.ReleaseID)
+	if err != nil {
+		return component.Result{}, err
+	}
+	ex := s.component.ExecutorFor(*item)
+	if ex == nil {
+		return component.Result{}, fmt.Errorf("上线项 %s 没有可回滚的组件执行器", item.Title)
+	}
+	started := time.Now().UTC()
+	exec, err := s.store.UpsertChangeExecution(ctx, models.ChangeExecution{
+		ReleaseID: rel.ID,
+		ItemID:    item.ID,
+		Slot:      slot,
+		Component: item.Component,
+		Action:    "rollback",
+		Node:      item.TargetNode,
+		Status:    "running",
+		StartedAt: started,
+	})
+	if err != nil {
+		return component.Result{}, err
+	}
+	var res component.Result
+	if slot == "blue" {
+		res, err = ex.RollbackBlue(ctx, *rel, *item)
+	} else {
+		res, err = ex.RollbackGreen(ctx, *rel, *item)
+	}
+	status := "success"
+	errMsg := ""
+	if err != nil {
+		status = "failed"
+		errMsg = err.Error()
+	}
+	s.finishComponentExecution(ctx, exec, status, res.Output, errMsg)
+	_ = s.store.SaveComponentTestReport(ctx, models.ComponentTestReport{
+		ReleaseID:      rel.ID,
+		ItemID:         item.ID,
+		Slot:           slot,
+		Component:      res.Component,
+		FunctionalJSON: component.MarshalResult(res),
+		DataDiffJSON:   component.MarshalResult(res),
+		AIVerdict:      componentVerdict(*item, res, res),
+		Passed:         err == nil && res.Status != "failed",
+	})
+	_ = s.store.AddAudit(ctx, actor, "component_manual_rollback_"+slot, item.ID, component.MarshalResult(res))
+	return res, err
+}
+
+func (s *Service) finishComponentExecution(ctx context.Context, e models.ChangeExecution, status, output, errMsg string) {
+	finished := time.Now().UTC()
+	e.Status = status
+	e.Output = output
+	e.Error = errMsg
+	e.FinishedAt = &finished
+	_, _ = s.store.UpsertChangeExecution(ctx, e)
+}
+
+func componentVerdict(item models.ChangeItem, test, apply component.Result) string {
+	expected := strings.TrimSpace(item.DataImpact)
+	if expected == "" {
+		expected = strings.TrimSpace(item.ExpectedImpact)
+	}
+	if test.Status == "failed" || apply.Status == "failed" {
+		return "AI 判定：组件执行或测试失败，需要负责人复核。预期影响：" + expected
+	}
+	if expected == "" {
+		return "AI 判定：组件执行成功；未填写数据影响，建议负责人补充预期影响。"
+	}
+	return "AI 判定：组件执行成功；实际结果需按报告核对是否符合预期影响：" + expected
+}
+
 func (s *Service) runAutoTest(ctx context.Context, id, actor, env, target string) (*models.Release, error) {
 	if s.deployWasCancelled(id) {
 		return nil, context.Canceled
@@ -496,12 +733,12 @@ func (s *Service) runAutoTest(ctx context.Context, id, actor, env, target string
 
 // finishGreenDeploy marks a green-only pre-release deploy as done (no prod traffic switch).
 func (s *Service) finishGreenDeploy(ctx context.Context, id, actor, msg string) (*models.Release, error) {
-	_ = s.store.UpdateStep(ctx, id, "switch_traffic", "skipped", "绿环境预发，不切生产流量")
-	_ = s.store.UpdateStep(ctx, id, "manual_verify", "skipped", "")
-	_ = s.store.UpdateStep(ctx, id, "sync_standby", "skipped", "")
-	_ = s.store.UpdateStep(ctx, id, "finish", "success", "绿环境部署完成")
-	_ = s.store.UpdateReleaseStatus(ctx, id, models.StatusDone)
-	_ = s.store.AddAudit(ctx, actor, "green_deploy_done", id, msg)
+	_ = s.store.UpdateStep(ctx, id, "switch_traffic", "pending", "绿环境已通过自动测试，等待一键切流")
+	_ = s.store.UpdateStep(ctx, id, "manual_verify", "pending", "切流后由负责人生产人工复测")
+	_ = s.store.UpdateStep(ctx, id, "sync_standby", "pending", "人工复测通过后同步同一批 change 到蓝环境")
+	_ = s.store.UpdateStep(ctx, id, "finish", "pending", "")
+	_ = s.store.UpdateReleaseStatus(ctx, id, models.StatusTesting)
+	_ = s.store.AddAudit(ctx, actor, "green_ready_to_switch", id, msg)
 	s.recordDeploySnapshot(ctx, id, actor, "green")
 	return s.store.GetRelease(ctx, id)
 }
@@ -588,6 +825,17 @@ func (s *Service) SyncToStandby(ctx context.Context, id, actor string) (*models.
 		}
 	} else {
 		out, errSync = s.ssh.DeployBlueCode(ctx)
+	}
+	if errSync == nil {
+		rel, _ := s.store.GetRelease(ctx, id)
+		if rel != nil {
+			compOut, compErr := s.executeComponentChanges(ctx, *rel, "blue", actor)
+			if compErr != nil {
+				errSync = compErr
+			} else if compOut != "" {
+				out = out + "; components: " + compOut
+			}
+		}
 	}
 	if errSync != nil {
 		_ = s.store.UpdateStep(ctx, id, "sync_standby", "failed", errSync.Error())

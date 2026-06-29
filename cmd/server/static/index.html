@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/app.css?v=20260625-loginfix2" />
+  <link rel="stylesheet" href="/app.css?v=20260629-warroom-wizard-responsive" />
 </head>
 <body>
   <div class="login-screen" id="loginScreen">
@@ -21,9 +21,14 @@
       </div>
       <label for="loginUser">用户名</label>
       <input id="loginUser" placeholder="例：juege" autocomplete="username" />
+      <label for="registerDisplayName" class="register-only" hidden>显示名</label>
+      <input id="registerDisplayName" class="register-only" placeholder="例：张三" autocomplete="name" hidden />
       <label for="loginPass">密码</label>
       <input id="loginPass" type="password" placeholder="请输入密码" autocomplete="current-password" />
+      <label for="registerPass2" class="register-only" hidden>确认密码</label>
+      <input id="registerPass2" class="register-only" type="password" placeholder="再次输入密码" autocomplete="new-password" hidden />
       <button type="button" class="btn-mega btn-login" id="btnLogin">登录 →</button>
+      <button type="button" class="auth-switch" id="btnAuthSwitch">创建普通账号</button>
       <p class="login-hint" id="loginHint">管理员 juege 可直通发布；其他用户需双评审 + 终审。</p>
       <p class="login-error" id="loginError" hidden></p>
     </div>
@@ -53,14 +58,33 @@
               </span>
               <span class="nav-label">部署前后端</span>
             </button>
-            <button type="button" class="nav-item" data-page="sql" title="更新绿环境数据库">
+            <button type="button" class="nav-item" data-page="war-room" title="填写 change 并按组件上线">
+              <span class="nav-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16"/><path d="M4 12h10"/><path d="M4 18h7"/><path d="M17 14l3 3-3 3"/><path d="M14 17h6"/></svg>
+              </span>
+              <span class="nav-label">Change 作战台</span>
+            </button>
+            <button type="button" class="nav-item" data-page="components" title="绿环境组件增量上线">
               <span class="nav-icon" aria-hidden="true">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
               </span>
-              <span class="nav-label">更新数据库</span>
+              <span class="nav-label">组件上线</span>
+            </button>
+            <button type="button" class="nav-item" data-page="sync-green" title="从蓝环境同步测试基线到绿环境">
+              <span class="nav-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7h12a4 4 0 0 1 0 8H7"/><path d="M7 11l-4-4 4-4"/><path d="M20 17H8a4 4 0 0 1 0-8h9"/><path d="M17 13l4 4-4 4"/></svg>
+              </span>
+              <span class="nav-label">基线同步</span>
             </button>
           </div>
         </div>
+
+        <button type="button" class="nav-item nav-item-standalone admin-only" data-page="users" title="用户管理" hidden>
+          <span class="nav-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+          </span>
+          <span class="nav-label">用户管理</span>
+        </button>
 
         <button type="button" class="nav-item nav-item-standalone" data-page="traffic" title="生产切流">
           <span class="nav-icon" aria-hidden="true">
@@ -202,32 +226,380 @@
           </div>
         </section>
 
-        <!-- 绿环境：更新数据库 -->
-        <section class="page page-sql" id="pageSql" data-page="sql" hidden>
+        <!-- Change 作战台 -->
+        <section class="page page-war-room" id="pageWarRoom" data-page="war-room" hidden>
           <div class="page-intro card">
             <p class="action-desc">
-              粘贴或编写 SQL，执行到绿库。<strong>仅 osh-g-mysql，与部署无关，可随时执行。</strong>
+              真正的上线能力从这里开始：负责人填写每个 change 的组件、节点、顺序、影响、测试计划、回滚策略和通知人。
+              平台会先按顺序执行到绿环境，自动测试通过后再切流和同步同一批 change 到蓝环境。
             </p>
-            <p class="sql-tip" id="sqlTip">—</p>
           </div>
 
-          <div class="sql-card card">
-            <label for="sqlLabel">备注（可选）</label>
-            <input id="sqlLabel" placeholder="例：osh_announcement 建表" />
+          <div class="war-layout">
+            <div class="card war-form">
+              <div class="war-form-head">
+                <span class="eyebrow">发布向导</span>
+                <h2 class="action-title">按组件创建上线项</h2>
+                <p class="action-desc">先选组件，再填这次改了什么、怎么验证。高级信息可以展开后补。</p>
+              </div>
 
-            <label for="customSql">SQL 语句</label>
-            <textarea id="customSql" class="sql-editor" rows="16" placeholder="粘贴 CREATE TABLE / ALTER TABLE 等 SQL…"></textarea>
+              <div class="wizard-section">
+                <div class="wizard-section-head">
+                  <span class="step-badge">1</span>
+                  <div>
+                    <strong>发布基础信息</strong>
+                    <span>一批 change 共用一个发布名称和上线类型</span>
+                  </div>
+                </div>
+                <label for="warReleaseTitle">发布名称</label>
+                <input id="warReleaseTitle" placeholder="例：20260708 组件增量上线" />
 
-            <div class="sql-toolbar">
-              <select id="sqlTemplate" class="sql-select">
-                <option value="">从模板填入（可选）</option>
-              </select>
-              <button type="button" class="btn btn-ghost" id="btnLoadTemplate">填入模板</button>
+                <div class="form-row compact">
+                  <div>
+                    <label for="warLevel">上线类型</label>
+                    <select id="warLevel">
+                      <option value="normal">常规上线</option>
+                      <option value="urgent">紧急上线</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label for="warDeployOrder">上线顺序</label>
+                    <input id="warDeployOrder" type="number" value="100" />
+                  </div>
+                </div>
+              </div>
+
+              <div class="component-picker">
+                <div class="component-picker-head">
+                  <div>
+                    <span class="eyebrow">第 2 步</span>
+                    <strong>先选择要上线的组件</strong>
+                  </div>
+                  <span id="activeComponentName" class="component-current">MySQL</span>
+                </div>
+                <div class="component-tabs" id="warComponentTabs" role="tablist" aria-label="组件页签">
+                  <button type="button" class="component-tab active" data-component-tab="mysql">MySQL</button>
+                  <button type="button" class="component-tab" data-component-tab="redis">Redis</button>
+                  <button type="button" class="component-tab" data-component-tab="nacos">Nacos</button>
+                  <button type="button" class="component-tab" data-component-tab="es">ES</button>
+                  <button type="button" class="component-tab" data-component-tab="kafka">Kafka</button>
+                  <button type="button" class="component-tab" data-component-tab="mongodb">MongoDB</button>
+                  <button type="button" class="component-tab" data-component-tab="hbase">HBase</button>
+                  <button type="button" class="component-tab" data-component-tab="application">代码</button>
+                </div>
+                <div class="component-guide" id="warComponentGuide">
+                  <strong>MySQL 上线</strong>
+                  <span>填写 SQL 文件或迁移说明，平台会先在绿库执行前做快照，失败自动恢复。</span>
+                </div>
+                <div class="component-checklist">
+                  <span>绿环境先测</span>
+                  <span>自动快照</span>
+                  <span>失败可回滚</span>
+                </div>
+              </div>
+
+              <div class="wizard-section">
+                <div class="wizard-section-head">
+                  <span class="step-badge">3</span>
+                  <div>
+                    <strong>填写这次 change</strong>
+                    <span>小白只需要先填标题、引用、影响和测试计划</span>
+                  </div>
+                </div>
+
+                <label for="changeTitle">Change 标题</label>
+                <input id="changeTitle" placeholder="例：补充公告表字段并刷新 Nacos 配置" />
+
+                <label for="changeRef">上线引用</label>
+                <input id="changeRef" placeholder="SQL 文件路径、配置 dataId、topic、git ref 或脚本参数" />
+
+                <div class="form-row compact">
+                  <div>
+                    <label for="targetNode">目标节点</label>
+                    <input id="targetNode" placeholder="例：osh-g-mysql-1 或 all" />
+                  </div>
+                  <div class="current-component-box">
+                    <span>当前组件</span>
+                    <strong id="activeComponentSummary">MySQL · 数据库变更</strong>
+                  </div>
+                </div>
+
+                <label for="expectedImpact">这次会影响什么</label>
+                <textarea id="expectedImpact" rows="3" placeholder="上线后会增加/修改哪些功能、接口或数据"></textarea>
+
+                <label for="testPlan">怎么确认没问题</label>
+                <textarea id="testPlan" rows="3" placeholder="接口、组件、数据差异、生产人工复测怎么验证"></textarea>
+
+                <div class="form-row compact">
+                  <div>
+                    <label for="changeDeveloper">负责人</label>
+                    <input id="changeDeveloper" placeholder="developer" />
+                  </div>
+                  <div>
+                    <label for="changeReviewers">两位评审人</label>
+                    <input id="changeReviewers" placeholder="reviewer-a, reviewer-b" />
+                  </div>
+                </div>
+              </div>
+
+              <details class="advanced-panel">
+                <summary>
+                  <span>高级设置</span>
+                  <small>数据影响、动作、回滚、责任人和通知</small>
+                </summary>
+
+                <div class="form-row compact">
+                  <div>
+                    <label for="changeType">类型</label>
+                    <select id="changeType">
+                      <option value="component">组件</option>
+                      <option value="migration">SQL / 数据</option>
+                      <option value="config">配置</option>
+                      <option value="code">代码</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label for="changeAction">动作</label>
+                    <input id="changeAction" value="apply" placeholder="apply / create / update / delete" />
+                  </div>
+                </div>
+
+                <div class="visually-hidden">
+                  <label for="componentType">组件</label>
+                  <select id="componentType">
+                    <option value="mysql">MySQL</option>
+                    <option value="nacos">Nacos</option>
+                    <option value="redis">Redis</option>
+                    <option value="es">ES</option>
+                    <option value="kafka">Kafka</option>
+                    <option value="mongodb">MongoDB</option>
+                    <option value="hbase">HBase</option>
+                    <option value="application">Java / Frontend</option>
+                  </select>
+                </div>
+
+                <label for="dataImpact">数据影响</label>
+                <textarea id="dataImpact" rows="3" placeholder="预计新增/删除/修改哪些表、key、index、topic，数量级是多少"></textarea>
+
+                <label for="rollbackStrategy">回滚策略</label>
+                <textarea id="rollbackStrategy" rows="3" placeholder="快照、回滚 SQL、配置恢复、切回蓝环境等"></textarea>
+
+                <div class="form-row compact">
+                  <div>
+                    <label for="conflictOwners">冲突责任人</label>
+                    <input id="conflictOwners" placeholder="dev-a, dev-b" />
+                  </div>
+                  <div>
+                    <label for="notifyEmails">通知邮箱</label>
+                    <input id="notifyEmails" placeholder="dev@example.com" />
+                  </div>
+                </div>
+              </details>
+
+              <div class="war-actions">
+                <button type="button" class="btn btn-ghost" id="btnAddChangeItem">加入 change 列表</button>
+                <button type="button" class="btn-mega" id="btnCreateWarRelease">生成发布单 →</button>
+              </div>
             </div>
 
-            <button type="button" class="btn-mega btn-sql-exec" id="btnExecSql">执行 SQL 到绿库 →</button>
+            <div class="war-main">
+              <div class="card">
+                <div class="war-head">
+                  <div>
+                    <h2 class="action-title">上线清单</h2>
+                    <p class="action-desc">左侧每点一次“加入 change 列表”，这里就会多一条待上线内容。</p>
+                  </div>
+                  <div class="segmented" role="tablist">
+                    <button type="button" data-war-view="table" class="active">表格</button>
+                    <button type="button" data-war-view="tree">树</button>
+                    <button type="button" data-war-view="graph">图</button>
+                  </div>
+                </div>
+                <div id="warRoomView" class="war-room-view"></div>
+              </div>
 
+              <div class="card">
+                <h2 class="action-title">执行与报告</h2>
+                <div id="warReports" class="war-report-grid"><div class="empty">暂无发布单执行数据</div></div>
+              </div>
+
+              <div class="card">
+                <h2 class="action-title">新组件规范模板</h2>
+                <div id="componentSpecs" class="component-specs"><div class="empty">加载中…</div></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 绿环境：组件增量上线 -->
+        <section class="page page-components" id="pageComponents" data-page="components" hidden>
+          <div class="page-intro card">
+            <p class="action-desc">
+              绿环境组件增量上线：可单个执行，也可把多个组件加入队列后逐个上线。按顺序执行，某项失败会跳过并继续下一项，已成功的不回滚。
+            </p>
+            <p class="sql-tip" id="componentOpsTip">—</p>
+          </div>
+
+          <div class="card component-batch-card">
+            <div class="component-batch-head">
+              <div>
+                <strong>批量上线队列</strong>
+                <span class="component-batch-hint">填好多个组件后点「加入队列」，将按 MySQL → Nacos → Redis → ES → Kafka 顺序逐个执行</span>
+              </div>
+              <div class="component-batch-actions">
+                <button type="button" class="btn btn-ghost" id="btnFillAllComponentTests">填入全部测试用例</button>
+                <button type="button" class="btn btn-ghost" id="btnClearComponentQueue">清空队列</button>
+                <button type="button" class="btn-mega" id="btnExecComponentBatch">逐个执行队列到绿环境 →</button>
+              </div>
+            </div>
+            <div id="componentOpsQueue" class="component-ops-queue"><div class="empty">队列为空。切换页签填写后点「加入队列」。</div></div>
+            <pre class="sql-result" id="batchResult" hidden></pre>
+          </div>
+
+          <div class="component-ops-tabs" role="tablist" aria-label="组件页签">
+            <button type="button" class="component-tab active" data-ops-tab="mysql">MySQL</button>
+            <button type="button" class="component-tab" data-ops-tab="redis">Redis</button>
+            <button type="button" class="component-tab" data-ops-tab="nacos">Nacos</button>
+            <button type="button" class="component-tab" data-ops-tab="es">ES</button>
+            <button type="button" class="component-tab" data-ops-tab="kafka">Kafka</button>
+          </div>
+
+          <div class="sql-card card component-ops-panel" data-ops-panel="mysql">
+            <p class="component-guide-inline">执行 SQL 到绿库 <strong>osh-g-mysql</strong>，执行前自动快照。</p>
+            <label for="sqlLabel">备注（可选）</label>
+            <input id="sqlLabel" placeholder="例：osh_announcement 建表" />
+            <label for="customSql">SQL 语句</label>
+            <textarea id="customSql" class="sql-editor" rows="14" placeholder="粘贴 CREATE TABLE / ALTER TABLE 等 SQL…"></textarea>
+            <div class="sql-toolbar">
+              <select id="sqlTemplate" class="sql-select"><option value="">从模板填入（可选）</option></select>
+              <button type="button" class="btn btn-ghost" id="btnLoadTemplate">填入模板</button>
+            </div>
+            <div class="component-ops-actions">
+              <button type="button" class="btn btn-ghost" id="btnFillMysqlTest">填入测试用例</button>
+              <button type="button" class="btn btn-ghost" id="btnQueueMysql">加入队列</button>
+              <button type="button" class="btn-mega btn-sql-exec" id="btnExecSql">立即执行到绿库 →</button>
+              <button type="button" class="btn btn-ghost" id="btnRollbackMysql">回滚上次 MySQL</button>
+            </div>
             <pre class="sql-result" id="sqlResult" hidden></pre>
+          </div>
+
+          <div class="sql-card card component-ops-panel" data-ops-panel="redis" hidden>
+            <p class="component-guide-inline">Redis 改键值：每行一条 <code>redis-cli</code> 命令，如 <code>SET session:test 1 EX 3600</code>。</p>
+            <label for="redisLabel">备注</label>
+            <input id="redisLabel" placeholder="例：预热登录缓存 key" />
+            <label for="redisPayload">Redis 命令（每行一条）</label>
+            <textarea id="redisPayload" class="sql-editor" rows="12" placeholder="SET foo bar EX 3600&#10;DEL stale:key"></textarea>
+            <div class="component-ops-actions">
+              <button type="button" class="btn btn-ghost" id="btnFillRedisTest">填入测试用例</button>
+              <button type="button" class="btn btn-ghost" id="btnQueueRedis">加入队列</button>
+              <button type="button" class="btn-mega" id="btnExecRedis">立即执行到绿 Redis →</button>
+              <button type="button" class="btn btn-ghost" id="btnRollbackRedis">回滚上次 Redis</button>
+            </div>
+            <pre class="sql-result" id="redisResult" hidden></pre>
+          </div>
+
+          <div class="sql-card card component-ops-panel" data-ops-panel="nacos" hidden>
+            <p class="component-guide-inline">Nacos 改配置：填写可执行脚本路径，或粘贴脚本内容（平台会上传到绿环境执行）。</p>
+            <label for="nacosLabel">备注</label>
+            <input id="nacosLabel" placeholder="例：调整支付超时配置" />
+            <label for="nacosRef">脚本路径（149 上绝对路径，可选）</label>
+            <input id="nacosRef" placeholder="/opt/osh-green/005-scripts/patch-nacos-payment.sh" />
+            <label for="nacosPayload">脚本内容（无路径时填写）</label>
+            <textarea id="nacosPayload" class="sql-editor" rows="10" placeholder="#!/usr/bin/env bash&#10;# curl Nacos API 更新配置…"></textarea>
+            <div class="component-ops-actions">
+              <button type="button" class="btn btn-ghost" id="btnFillNacosTest">填入测试用例</button>
+              <button type="button" class="btn btn-ghost" id="btnQueueNacos">加入队列</button>
+              <button type="button" class="btn-mega" id="btnExecNacos">立即执行到绿 Nacos →</button>
+              <button type="button" class="btn btn-ghost" id="btnRollbackNacos">回滚上次 Nacos</button>
+            </div>
+            <pre class="sql-result" id="nacosResult" hidden></pre>
+          </div>
+
+          <div class="sql-card card component-ops-panel" data-ops-panel="es" hidden>
+            <p class="component-guide-inline">ES 改索引/数据：填写 mapping 脚本路径或脚本内容（创建索引、改 mapping、alias 等）。</p>
+            <label for="esLabel">备注</label>
+            <input id="esLabel" placeholder="例：course_index 新增 teacher_name" />
+            <label for="esRef">脚本路径（可选）</label>
+            <input id="esRef" placeholder="/opt/osh-green/005-scripts/patch-es-course.sh" />
+            <label for="esPayload">脚本内容</label>
+            <textarea id="esPayload" class="sql-editor" rows="10" placeholder="#!/usr/bin/env bash&#10;curl -u elastic:*** -X PUT …"></textarea>
+            <div class="component-ops-actions">
+              <button type="button" class="btn btn-ghost" id="btnFillEsTest">填入测试用例</button>
+              <button type="button" class="btn btn-ghost" id="btnQueueEs">加入队列</button>
+              <button type="button" class="btn-mega" id="btnExecEs">立即执行到绿 ES →</button>
+              <button type="button" class="btn btn-ghost" id="btnRollbackEs">回滚上次 ES</button>
+            </div>
+            <pre class="sql-result" id="esResult" hidden></pre>
+          </div>
+
+          <div class="sql-card card component-ops-panel" data-ops-panel="kafka" hidden>
+            <p class="component-guide-inline">Kafka 常见上线：新建 topic。填写 topic 名和分区数；已有 topic 不会覆盖。</p>
+            <label for="kafkaLabel">备注</label>
+            <input id="kafkaLabel" placeholder="例：新增支付事件 topic" />
+            <label for="kafkaTopic">Topic 名称</label>
+            <input id="kafkaTopic" placeholder="osh.payment.event" />
+            <label for="kafkaPartitions">分区数</label>
+            <input id="kafkaPartitions" type="number" value="3" min="1" />
+            <div class="component-ops-actions">
+              <button type="button" class="btn btn-ghost" id="btnFillKafkaTest">填入测试用例</button>
+              <button type="button" class="btn btn-ghost" id="btnQueueKafka">加入队列</button>
+              <button type="button" class="btn-mega" id="btnExecKafka">立即创建到绿 Kafka →</button>
+              <button type="button" class="btn btn-ghost" id="btnRollbackKafka">回滚上次 Kafka</button>
+            </div>
+            <pre class="sql-result" id="kafkaResult" hidden></pre>
+          </div>
+
+          <details class="fold card">
+            <summary>最近组件操作记录</summary>
+            <div id="componentOpsHistory" class="component-ops-history"><div class="empty">切换页签后加载…</div></div>
+          </details>
+        </section>
+
+        <!-- legacy alias: sql page merged into components -->
+        <section class="page page-sql" id="pageSql" data-page="sql" hidden aria-hidden="true"></section>
+
+        <!-- 绿环境：从蓝同步测试基线 -->
+        <section class="page page-sync-green" id="pageSyncGreen" data-page="sync-green" hidden>
+          <div class="page-intro card env-intro">
+            <p class="action-desc">
+              生产仍在<strong>蓝环境</strong>时，以蓝环境为只读源，把 MySQL、Nacos、Redis、ES、Kafka 等组件增量同步到绿环境，形成测试基线。
+              同步过程会把配置中的 <code>osh-*</code> 自动改写为 <code>osh-g-*</code>，避免绿环境误连蓝组件。
+            </p>
+            <p class="sql-tip" id="greenSyncTip">—</p>
+          </div>
+
+          <div class="deploy-lock-banner warn" id="greenSyncGuardBanner" hidden>
+            <span class="lock-icon">⚠️</span>
+            <span id="greenSyncGuardText">—</span>
+          </div>
+
+          <div class="deploy-lock-banner" id="greenSyncLockBanner" hidden>
+            <span class="lock-icon">⏳</span>
+            <span id="greenSyncLockText">—</span>
+          </div>
+
+          <div class="blue-sync-card card">
+            <h2 class="action-title">蓝 → 绿 环境基线同步</h2>
+            <p class="action-desc">这是运维基线任务，不是 change 上线能力。它用于保持绿环境接近蓝环境，方便后续把填写的 change 先上线到绿测试。</p>
+
+            <div class="component-sync-grid">
+              <div><strong>MySQL</strong><span>schema delta + row upsert</span></div>
+              <div><strong>Nacos</strong><span>config copy + green rewrite</span></div>
+              <div><strong>Redis</strong><span>key restore replace</span></div>
+              <div><strong>ES</strong><span>mapping + data upsert</span></div>
+              <div><strong>Kafka</strong><span>topic metadata sync</span></div>
+            </div>
+
+            <label for="greenSyncReason">备注（可选）</label>
+            <input id="greenSyncReason" placeholder="例：保持绿环境为蓝环境拷贝，供发布功能测试" />
+
+            <button type="button" class="btn-mega" id="btnSyncGreenAll">
+              <span>开始蓝 → 绿 基线同步 →</span>
+              <span class="btn-arrow">→</span>
+            </button>
+            <p class="env-hint" id="greenSyncHint">仅当生产流量在蓝环境时可操作；真正上线请走 Change 作战台。</p>
+
+            <pre class="sql-result" id="greenSyncResult" hidden></pre>
           </div>
         </section>
 
@@ -442,6 +814,34 @@
             <pre class="sql-result" id="blueSyncResult" hidden></pre>
           </div>
         </section>
+
+        <!-- 管理员：用户管理 -->
+        <section class="page page-users" id="pageUsers" data-page="users" hidden>
+          <div class="page-intro card">
+            <p class="action-desc">管理员可创建、修改角色、重置密码和删除普通用户。超级管理员不可删除。</p>
+          </div>
+          <div class="war-layout">
+            <div class="card war-form">
+              <h2 class="action-title">新建用户</h2>
+              <label for="newUserName">用户名</label>
+              <input id="newUserName" placeholder="例：zhangsan" />
+              <label for="newUserDisplay">显示名</label>
+              <input id="newUserDisplay" placeholder="例：张三" />
+              <label for="newUserPass">初始密码</label>
+              <input id="newUserPass" type="password" placeholder="至少 8 位" />
+              <label for="newUserRole">角色</label>
+              <select id="newUserRole">
+                <option value="normal">普通用户</option>
+                <option value="admin">管理员</option>
+              </select>
+              <button type="button" class="btn-mega" id="btnCreateUser">创建用户 →</button>
+            </div>
+            <div class="card war-main">
+              <h2 class="action-title">用户列表</h2>
+              <div id="userList" class="user-list"><div class="empty">加载中…</div></div>
+            </div>
+          </div>
+        </section>
       </main>
 
       <footer class="env-footer">
@@ -460,6 +860,6 @@
   <input type="hidden" id="rev2" value="rev-c" />
   <input type="hidden" id="impact" value="前后端代码更新，仅部署绿环境" />
 
-  <script src="/app.js?v=20260625-loginfix2"></script>
+  <script src="/app.js?v=20260629-green-verify"></script>
 </body>
 </html>

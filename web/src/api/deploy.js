@@ -23,6 +23,25 @@ export async function fetchRuns() {
   return res.json()
 }
 
+export async function fetchComponentSyncActive() {
+  const res = await fetch('/api/component-sync/active')
+  if (!res.ok) throw new Error('component sync status failed')
+  return res.json()
+}
+
+export async function startBlueToGreenAllComponentSync(reason = '') {
+  const res = await fetch('/api/component-sync/blue-to-green/all', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ actor: 'ops', reason }),
+  })
+  if (!res.ok) {
+    const text = await res.text()
+    throw new Error(text || `HTTP ${res.status}`)
+  }
+  return res.json()
+}
+
 export async function fetchRun(runId) {
   const res = await fetch(`/api/runs/${runId}`)
   if (!res.ok) throw new Error('get run failed')
