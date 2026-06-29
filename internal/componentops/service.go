@@ -9,8 +9,10 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/juege/osh-prod-release/internal/config"
+	"github.com/juege/osh-prod-release/internal/models"
 	"github.com/juege/osh-prod-release/internal/ssh"
 	"github.com/juege/osh-prod-release/internal/store"
+	"github.com/juege/osh-prod-release/internal/testrunner"
 )
 
 type ApplyRequest struct {
@@ -31,32 +33,36 @@ type BatchApplyRequest struct {
 }
 
 type BatchApplyResult struct {
-	Results      []OpResult `json:"results"`
-	Failed       bool       `json:"failed"`
-	SuccessCount int        `json:"success_count"`
-	FailCount    int        `json:"fail_count"`
-	Message      string     `json:"message,omitempty"`
+	Results      []OpResult                  `json:"results"`
+	Failed       bool                        `json:"failed"`
+	SuccessCount int                         `json:"success_count"`
+	FailCount    int                         `json:"fail_count"`
+	Message      string                      `json:"message,omitempty"`
+	BatchID      string                      `json:"batch_id,omitempty"`
+	AutoTest     *models.BatchAutoTestReport `json:"auto_test,omitempty"`
 }
 
 type OpResult struct {
-	ID         string `json:"id"`
-	Kind       string `json:"kind"`
-	Slot       string `json:"slot"`
-	Action     string `json:"action"`
-	Status     string `json:"status"`
-	Output     string `json:"output"`
-	RefPath    string `json:"ref_path,omitempty"`
-	RolledBack bool   `json:"rolled_back,omitempty"`
+	ID           string `json:"id"`
+	Kind         string `json:"kind"`
+	Slot         string `json:"slot"`
+	Action       string `json:"action"`
+	Status       string `json:"status"`
+	Output       string `json:"output"`
+	RefPath      string `json:"ref_path,omitempty"`
+	DataDiffJSON string `json:"data_diff_json,omitempty"`
+	RolledBack   bool   `json:"rolled_back,omitempty"`
 }
 
 type Service struct {
 	cfg   *config.Config
 	store *store.Store
 	ssh   *ssh.Client
+	test  *testrunner.Runner
 }
 
 func New(cfg *config.Config, st *store.Store, sshClient *ssh.Client) *Service {
-	return &Service{cfg: cfg, store: st, ssh: sshClient}
+	return &Service{cfg: cfg, store: st, ssh: sshClient, test: testrunner.New(cfg)}
 }
 
 func (s *Service) Apply(ctx context.Context, req ApplyRequest) (*OpResult, error) {
@@ -108,13 +114,14 @@ func (s *Service) Apply(ctx context.Context, req ApplyRequest) (*OpResult, error
 	}
 
 	full = strings.TrimSpace(full)
+	dataDiff := parseDataDiffFromOutput(full)
 	_ = s.store.SaveComponentDirectOp(ctx, store.ComponentDirectOp{
 		ID: opID, Kind: kind, Slot: slot, Action: action, RefPath: refPath,
 		Node: req.Node, WorkRelease: releaseKey, WorkItem: itemKey,
 		Actor: req.Actor, Status: "success", Output: full,
 	})
 	_ = s.store.AddAudit(ctx, req.Actor, "component_direct_apply_"+kind, opID, full)
-	return &OpResult{ID: opID, Kind: kind, Slot: slot, Action: action, Status: "success", Output: full, RefPath: refPath}, nil
+	return &OpResult{ID: opID, Kind: kind, Slot: slot, Action: action, Status: "success", Output: full, RefPath: refPath, DataDiffJSON: dataDiff}, nil
 }
 
 func (s *Service) Rollback(ctx context.Context, kind, slot, actor string) (*OpResult, error) {
@@ -158,6 +165,7 @@ func (s *Service) ApplyBatch(ctx context.Context, req BatchApplyRequest) (*Batch
 	items := append([]ApplyRequest(nil), req.Items...)
 	sortBatchItems(items)
 
+	batchID := uuid.New().String()[:12]
 	var results []OpResult
 	var failedKinds []string
 	for i, item := range items {
@@ -205,6 +213,8 @@ func (s *Service) ApplyBatch(ctx context.Context, req BatchApplyRequest) (*Batch
 		SuccessCount: successCount,
 		FailCount:    failCount,
 		Message:      msg,
+		BatchID:      batchID,
+		AutoTest:     s.runBatchAutoTest(ctx, batchID, items, results, req.Actor),
 	}, nil
 }
 
@@ -321,7 +331,7 @@ func (s *Service) runApplyPipeline(ctx context.Context, kind, slot, releaseKey, 
 	b.WriteString(fmt.Sprintf("%q --kind %q --release %q --item %q --action %q --ref %q --node %q; }\n",
 		slot, kind, releaseKey, itemKey, action, refPath, node))
 	b.WriteString(`failed=0
-for phase in snapshot apply-green test; do
+for phase in snapshot apply-green test diff-report; do
   echo "=== phase=$phase ==="
   if ! run_phase "$phase"; then failed=1; break; fi
 done

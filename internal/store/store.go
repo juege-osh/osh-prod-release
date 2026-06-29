@@ -79,6 +79,20 @@ func Open(sqlitePath string) (*Store, error) {
 			created_at TEXT NOT NULL
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_component_direct_ops_kind ON component_direct_ops(kind, slot, created_at)`,
+		`CREATE TABLE IF NOT EXISTS batch_auto_test_reports (
+			id TEXT PRIMARY KEY,
+			batch_id TEXT NOT NULL,
+			slot TEXT NOT NULL DEFAULT 'green',
+			functional_json TEXT,
+			data_diff_json TEXT,
+			ai_verdict TEXT,
+			ai_passed INTEGER NOT NULL DEFAULT 0,
+			passed INTEGER NOT NULL DEFAULT 0,
+			actor TEXT,
+			created_at TEXT NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_batch_auto_test_batch ON batch_auto_test_reports(batch_id, created_at)`,
+		`ALTER TABLE batch_auto_test_reports ADD COLUMN trigger TEXT DEFAULT 'batch'`,
 	} {
 		_, _ = db.Exec(stmt)
 	}

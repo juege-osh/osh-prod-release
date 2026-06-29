@@ -60,7 +60,7 @@ func TestAnalyzerOfflineFallsBackToStructuredImpactSummary(t *testing.T) {
 		},
 	}
 
-	dataDiff, verdict, passed := runner.callAnalyzer(context.Background(), rel)
+	dataDiff, verdict, passed := runner.callAnalyzer(context.Background(), rel, nil)
 	if !passed {
 		t.Fatalf("offline analyzer should not block green validation: verdict=%s", verdict)
 	}
@@ -69,6 +69,20 @@ func TestAnalyzerOfflineFallsBackToStructuredImpactSummary(t *testing.T) {
 	}
 	if !strings.Contains(dataDiff, "Redis key 增量") || !strings.Contains(dataDiff, "新增 session key 前缀") {
 		t.Fatalf("fallback data diff missing item impact:\n%s", dataDiff)
+	}
+}
+
+func TestGreenProbeCommandsUseEnvFileAndKafkaBin(t *testing.T) {
+	runner := New(&config.Config{MockMode: false})
+	slot := "green"
+	if got := runner.redisProbe(slot); !strings.Contains(got, "osh-green-stack.env") || !strings.Contains(got, "osh-g-redis") {
+		t.Fatalf("redis probe = %q", got)
+	}
+	if got := runner.esProbe(slot); !strings.Contains(got, "ES_PASSWORD") || !strings.Contains(got, "29200") {
+		t.Fatalf("es probe = %q", got)
+	}
+	if got := runner.kafkaProbe(slot); !strings.Contains(got, "/opt/kafka/bin/kafka-topics.sh") || !strings.Contains(got, "pipefail") {
+		t.Fatalf("kafka probe = %q", got)
 	}
 }
 

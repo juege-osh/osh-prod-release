@@ -37,7 +37,7 @@ func (r *Runner) Run(ctx context.Context, rel models.Release, env string) (*mode
 	functional := r.runFunctionalProbes(ctx, env)
 	fb, _ := json.Marshal(functional)
 
-	dataDiff, aiVerdict, aiPassed := r.callAnalyzer(ctx, rel)
+	dataDiff, aiVerdict, aiPassed := r.callAnalyzer(ctx, rel, functional)
 
 	passed := true
 	for _, c := range functional {
@@ -81,9 +81,9 @@ func (r *Runner) runFunctionalProbes(ctx context.Context, env string) []function
 		cmd    string
 	}{
 		{name: "mysql_ping_schema", target: slot + "/mysql", cmd: r.mysqlProbe(slot)},
-		{name: "redis_ping_key", target: slot + "/redis", cmd: redisProbe(slot)},
-		{name: "es_index_count", target: slot + "/elasticsearch", cmd: esProbe(slot)},
-		{name: "kafka_topic_smoke", target: slot + "/kafka", cmd: kafkaProbe(slot)},
+		{name: "redis_ping_key", target: slot + "/redis", cmd: r.redisProbe(slot)},
+		{name: "es_index_count", target: slot + "/elasticsearch", cmd: r.esProbe(slot)},
+		{name: "kafka_topic_smoke", target: slot + "/kafka", cmd: r.kafkaProbe(slot)},
 		{name: "nacos_config_checksum", target: slot + "/nacos", cmd: nacosProbe(slot)},
 		{name: "java_api_key_paths", target: slot + "/api", cmd: apiProbe(slot)},
 	}
@@ -117,23 +117,49 @@ func (r *Runner) mysqlProbe(slot string) string {
 	return fmt.Sprintf("docker exec %s sh -lc %s", shellWord(container), shellWord(inner))
 }
 
-func redisProbe(slot string) string {
-	c := slotContainer(slot, "redis")
-	return fmt.Sprintf("docker exec %s sh -lc 'redis-cli -a \"${REDIS_PASSWORD:-}\" --no-auth-warning PING 2>/dev/null || redis-cli PING' | grep -qx PONG", shellWord(c))
+func slotEnvFile(slot string) string {
+	if slot == "blue" {
+		return "/opt/osh/001-docker-compose/osh/osh-stack.env"
+	}
+	return "/opt/osh-green/001-docker-compose/osh/osh-green-stack.env"
 }
 
-func esProbe(slot string) string {
+func envPasswordExpr(envFile, key string) string {
+	return fmt.Sprintf(
+		`pass=$(awk -F= -v k=%s '$1==k {print substr($0,length(k)+2); exit}' %s)`,
+		shellWord(key), shellWord(envFile),
+	)
+}
+
+func (r *Runner) redisProbe(slot string) string {
+	c := slotContainer(slot, "redis")
+	env := slotEnvFile(slot)
+	return fmt.Sprintf(
+		`%s; test -n "$pass"; docker exec %s redis-cli -a "$pass" --no-auth-warning PING | grep -qx PONG`,
+		envPasswordExpr(env, "REDIS_PASSWORD"), shellWord(c),
+	)
+}
+
+func (r *Runner) esProbe(slot string) string {
 	port := "29200"
 	if slot == "blue" {
 		port = "59200"
 	}
-	return fmt.Sprintf("curl -sf --max-time 10 http://127.0.0.1:%s/_cluster/health", port)
+	env := slotEnvFile(slot)
+	return fmt.Sprintf(
+		`%s; curl -sf -u "elastic:$pass" --max-time 10 http://127.0.0.1:%s/_cluster/health >/dev/null && curl -sf -u "elastic:$pass" --max-time 10 "http://127.0.0.1:%s/_cat/indices?h=index,docs.count" | sed -n "1,5p"`,
+		envPasswordExpr(env, "ES_PASSWORD"), port, port,
+	)
 }
 
-func kafkaProbe(slot string) string {
+func (r *Runner) kafkaProbe(slot string) string {
 	c := slotContainer(slot, "kafka")
 	bootstrap := c + ":9092"
-	return fmt.Sprintf("docker exec %s sh -lc 'kafka-topics.sh --bootstrap-server %q --list | sed -n \"1,20p\"'", shellWord(c), bootstrap)
+	inner := fmt.Sprintf(
+		"set -o pipefail; /opt/kafka/bin/kafka-topics.sh --bootstrap-server %s --list | sed -n '1,20p'",
+		shellWord(bootstrap),
+	)
+	return fmt.Sprintf("docker exec %s bash -lc %s", shellWord(c), shellWord(inner))
 }
 
 func nacosProbe(slot string) string {
@@ -166,17 +192,30 @@ func normalizeSlot(env string) string {
 	return "green"
 }
 
-func (r *Runner) callAnalyzer(ctx context.Context, rel models.Release) (dataDiffJSON, verdict string, passed bool) {
+func (r *Runner) callAnalyzer(ctx context.Context, rel models.Release, functional []functionalCase) (dataDiffJSON, verdict string, passed bool) {
 	if r.cfg.MockMode {
 		diff := fallbackDataDiff(rel, "mock")
 		b, _ := json.Marshal(diff)
 		return string(b), "consistent (mock)", true
 	}
+	expectedItems := make([]map[string]any, 0, len(rel.Items))
+	for _, it := range rel.Items {
+		expectedItems = append(expectedItems, map[string]any{
+			"title":           it.Title,
+			"component":       defaultString(it.Component, it.ComponentType),
+			"expected_impact": it.ExpectedImpact,
+			"data_impact":     it.DataImpact,
+			"test_plan":       it.TestPlan,
+			"ref":             it.Ref,
+		})
+	}
 	body := map[string]any{
-		"release_id":  rel.ID,
-		"expected":    collectExpected(rel.Items),
-		"data_impact": collectDataImpact(rel.Items),
-		"test_plan":   collectTestPlans(rel.Items),
+		"release_id":     rel.ID,
+		"expected":       collectExpected(rel.Items),
+		"data_impact":    collectDataImpact(rel.Items),
+		"test_plan":      collectTestPlans(rel.Items),
+		"expected_items": expectedItems,
+		"functional":     functional,
 	}
 	payload, _ := json.Marshal(body)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, r.cfg.AnalyzerURL+"/api/diff-and-judge", bytes.NewReader(payload))

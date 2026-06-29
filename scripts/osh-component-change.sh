@@ -152,14 +152,18 @@ EOF
 }
 
 mysql_snapshot() {
-  local c pass dbs
+  local c pass dbs db
   c="$(mysql_container)"
   pass="$(mysql_password)"
+  db="$(mysql_database)"
   dbs="${MYSQL_DATABASES:-backstage osh_secret xxl_job}"
   require_container "$c"
   [[ -n "$pass" ]] || { echo "MYSQL_ROOT_PASSWORD missing for $SLOT" >&2; exit 13; }
   docker exec "$c" mysqldump -uroot -p"${pass}" --single-transaction --routines --triggers --events --databases ${dbs} > "$WORK/mysql-before.sql"
   test -s "$WORK/mysql-before.sql"
+  docker exec "$c" mysql -uroot -p"${pass}" -N -B -e \
+    "SELECT table_name FROM information_schema.tables WHERE table_schema='${db}' ORDER BY 1" \
+    > "$WORK/mysql-tables-before.tsv" || true
   log "mysql snapshot: $WORK/mysql-before.sql"
 }
 
@@ -196,12 +200,16 @@ mysql_rollback() {
 }
 
 mysql_test() {
-  local c pass
+  local c pass db
   c="$(mysql_container)"
   pass="$(mysql_password)"
+  db="$(mysql_database)"
   require_container "$c"
   docker exec "$c" mysqladmin ping -uroot -p"${pass}" --silent
   docker exec "$c" mysql -uroot -p"${pass}" -N -B -e "SELECT 1" > "$WORK/mysql-test.tsv"
+  docker exec "$c" mysql -uroot -p"${pass}" -N -B -e \
+    "SELECT table_name FROM information_schema.tables WHERE table_schema='${db}' ORDER BY 1" \
+    > "$WORK/mysql-tables-after.tsv" || true
   log "mysql test passed"
 }
 
@@ -233,6 +241,7 @@ redis_test() {
   pass="$(redis_password)"
   require_container "$c"
   docker exec "$c" redis-cli -a "$pass" --no-auth-warning PING | grep -qx PONG
+  docker exec "$c" redis-cli -a "$pass" --no-auth-warning INFO keyspace > "$WORK/redis-keyspace-after.txt" || true
   log "redis test passed"
 }
 
@@ -252,7 +261,8 @@ nacos_apply() {
 nacos_test() {
   local url
   url="$(nacos_url)"
-  curl -sf "$url/nacos/v1/ns/operator/metrics" > "$WORK/nacos-test.json"
+  curl -sf "$url/nacos/v1/ns/operator/metrics" > "$WORK/nacos-metrics-after.json"
+  cp "$WORK/nacos-metrics-after.json" "$WORK/nacos-test.json"
   log "nacos test passed"
 }
 
@@ -275,6 +285,7 @@ es_test() {
   url="$(es_url)"
   pass="$(es_password)"
   curl -sf -u "elastic:${pass}" "$url/_cluster/health" > "$WORK/es-health-test.json"
+  curl -sf -u "elastic:${pass}" "$url/_cat/indices?h=index,docs.count,store.size" > "$WORK/es-indices-after.tsv" || true
   log "es test passed"
 }
 
@@ -439,6 +450,131 @@ phase_test() {
   esac
 }
 
+comm_lines() {
+  # comm_lines mode before after  (mode: added|removed)
+  local mode="$1" before="$2" after="$3"
+  [[ -f "$before" && -f "$after" ]] || return 0
+  case "$mode" in
+    added) comm -13 "$before" "$after" | sed '/^$/d' ;;
+    removed) comm -23 "$before" "$after" | sed '/^$/d' ;;
+  esac
+}
+
+redis_key_count() {
+  local file="$1"
+  [[ -f "$file" ]] || { echo 0; return; }
+  awk -F: '/^db[0-9]+:keys=/ { s += $2 } END { print s+0 }' "$file" 2>/dev/null || echo 0
+}
+
+emit_data_diff_json() {
+  python3 -c 'import json,sys; print("__OSH_DATA_DIFF__"+json.dumps(json.loads(sys.argv[1]), ensure_ascii=False))' "$1"
+}
+
+mysql_diff_report() {
+  local db added removed
+  db="$(mysql_database)"
+  added="$(comm_lines added "$WORK/mysql-tables-before.tsv" "$WORK/mysql-tables-after.tsv" | tr '\n' ',' | sed 's/,$//')"
+  removed="$(comm_lines removed "$WORK/mysql-tables-before.tsv" "$WORK/mysql-tables-after.tsv" | tr '\n' ',' | sed 's/,$//')"
+  local payload
+  payload=$(WORK="$WORK" DB="$db" ADDED="$added" REMOVED="$removed" python3 - <<'PY'
+import json, os
+added=[x for x in os.environ.get("ADDED","").split(",") if x]
+removed=[x for x in os.environ.get("REMOVED","").split(",") if x]
+print(json.dumps({
+  "component":"mysql","database":os.environ.get("DB","backstage"),
+  "added":added,"removed":removed,"modified":[],
+  "summary":{"added_count":len(added),"removed_count":len(removed),"modified_count":0}
+}, ensure_ascii=False))
+PY
+)
+  emit_data_diff_json "$payload"
+}
+
+redis_diff_report() {
+  local payload
+  payload=$(WORK="$WORK" python3 - <<'PY'
+import json, os, re
+work=os.environ.get("WORK",".")
+def key_count(path):
+    try:
+        text=open(path).read()
+    except OSError:
+        return 0
+    return sum(int(m.group(1)) for m in re.finditer(r'keys=(\d+)', text))
+before=key_count(f"{work}/redis-keyspace-before.txt")
+after=key_count(f"{work}/redis-keyspace-after.txt")
+added, removed = [], []
+if after > before: added.append(f"keys +{after-before} (total {after})")
+elif after < before: removed.append(f"keys -{before-after} (total {after})")
+print(json.dumps({
+  "component":"redis","added":added,"removed":removed,"modified":[],
+  "summary":{"keys_before":before,"keys_after":after,
+    "added_count":max(0,after-before),"removed_count":max(0,before-after),"modified_count":0}
+}, ensure_ascii=False))
+PY
+)
+  emit_data_diff_json "$payload"
+}
+
+kafka_diff_report() {
+  cp "$WORK/kafka-test-topics.txt" "$WORK/kafka-topics-after.txt" 2>/dev/null || true
+  local added removed
+  added="$(comm_lines added "$WORK/kafka-topics-before.txt" "$WORK/kafka-topics-after.txt" | tr '\n' ',' | sed 's/,$//')"
+  removed="$(comm_lines removed "$WORK/kafka-topics-before.txt" "$WORK/kafka-topics-after.txt" | tr '\n' ',' | sed 's/,$//')"
+  local payload
+  payload=$(ADDED="$added" REMOVED="$removed" python3 - <<'PY'
+import json, os
+added=[x for x in os.environ.get("ADDED","").split(",") if x]
+removed=[x for x in os.environ.get("REMOVED","").split(",") if x]
+print(json.dumps({
+  "component":"kafka","added":added,"removed":removed,"modified":[],
+  "summary":{"added_count":len(added),"removed_count":len(removed),"modified_count":0}
+}, ensure_ascii=False))
+PY
+)
+  emit_data_diff_json "$payload"
+}
+
+es_diff_report() {
+  local added removed
+  added="$(comm -13 <(cut -f1 "$WORK/es-indices-before.tsv" 2>/dev/null | sort -u) <(cut -f1 "$WORK/es-indices-after.tsv" 2>/dev/null | sort -u) 2>/dev/null | tr '\n' ',' | sed 's/,$//')"
+  removed="$(comm -23 <(cut -f1 "$WORK/es-indices-before.tsv" 2>/dev/null | sort -u) <(cut -f1 "$WORK/es-indices-after.tsv" 2>/dev/null | sort -u) 2>/dev/null | tr '\n' ',' | sed 's/,$//')"
+  local payload
+  payload=$(ADDED="$added" REMOVED="$removed" python3 - <<'PY'
+import json, os
+added=[x for x in os.environ.get("ADDED","").split(",") if x]
+removed=[x for x in os.environ.get("REMOVED","").split(",") if x]
+print(json.dumps({
+  "component":"es","added":added,"removed":removed,"modified":[],
+  "summary":{"added_count":len(added),"removed_count":len(removed),"modified_count":0}
+}, ensure_ascii=False))
+PY
+)
+  emit_data_diff_json "$payload"
+}
+
+nacos_diff_report() {
+  local payload='{"component":"nacos","added":[],"removed":[],"modified":[],"summary":{"added_count":0,"removed_count":0,"modified_count":0,"note":"nacos config diff requires dataId-level snapshot"}}'
+  if [[ -f "$WORK/nacos-metrics-before.json" && -f "$WORK/nacos-metrics-after.json" ]]; then
+    if ! cmp -s "$WORK/nacos-metrics-before.json" "$WORK/nacos-metrics-after.json" 2>/dev/null; then
+      payload='{"component":"nacos","added":["metrics changed"],"removed":[],"modified":["operator metrics"],"summary":{"added_count":1,"removed_count":0,"modified_count":1}}'
+    fi
+  fi
+  emit_data_diff_json "$payload"
+}
+
+phase_diff_report() {
+  case "$KIND" in
+    mysql) mysql_diff_report ;;
+    redis) redis_diff_report ;;
+    nacos) nacos_diff_report ;;
+    es) es_diff_report ;;
+    kafka) kafka_diff_report ;;
+    *) emit_data_diff_json '{"component":"'"$KIND"'","added":[],"removed":[],"modified":[],"summary":{"added_count":0,"removed_count":0,"modified_count":0}}' ;;
+  esac
+  log "data diff report emitted for kind=$KIND"
+}
+
 log "start phase=${PHASE} slot=${SLOT} kind=${KIND} release=${RELEASE} item=${ITEM} action=${ACTION} ref=${REF} node=${NODE}"
 require_cmd docker
 
@@ -448,6 +584,7 @@ case "$PHASE" in
   apply-green|apply-blue) phase_apply ;;
   rollback-green|rollback-blue) phase_rollback ;;
   test) phase_test ;;
+  diff-report) phase_diff_report ;;
   *) echo "unsupported phase: $PHASE" >&2; exit 2 ;;
 esac
 

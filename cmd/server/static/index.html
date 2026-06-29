@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/app.css?v=20260629-warroom-wizard-responsive" />
+  <link rel="stylesheet" href="/app.css?v=20260629-page-hidden-fix" />
 </head>
 <body>
   <div class="login-screen" id="loginScreen">
@@ -69,6 +69,12 @@
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
               </span>
               <span class="nav-label">组件上线</span>
+            </button>
+            <button type="button" class="nav-item" data-page="auto-test" title="绿环境功能与数据自动化测试">
+              <span class="nav-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+              </span>
+              <span class="nav-label">自动化测试</span>
             </button>
             <button type="button" class="nav-item" data-page="sync-green" title="从蓝环境同步测试基线到绿环境">
               <span class="nav-icon" aria-hidden="true">
@@ -212,6 +218,11 @@
               <details class="fold card">
                 <summary>历史发布单</summary>
                 <div class="release-list" id="list"><div class="empty">加载中…</div></div>
+              </details>
+
+              <details class="fold card" id="autoTestFold" hidden>
+                <summary>自动化测试报告（功能 + 数据 diff + AI 判定）</summary>
+                <div id="deployAutoTestReport" class="auto-test-body"></div>
               </details>
 
               <details class="fold card" id="rollbackFold">
@@ -555,6 +566,49 @@
           </details>
         </section>
 
+        <!-- 绿环境：自动化测试（独立页，勿与组件上线混排） -->
+        <section class="page page-auto-test" id="pageAutoTest" data-page="auto-test" hidden>
+          <div class="auto-test-hero card">
+            <div class="auto-test-hero-copy">
+              <span class="eyebrow">绿环境 · 只读探测</span>
+              <h2 class="action-title">一键自动化测试</h2>
+              <p class="action-desc">
+                探测 MySQL / Redis / Nacos / ES / Kafka / Java API 是否可用，并汇总最近组件上线的数据变更，由 AI 判断是否与预期一致。
+              </p>
+              <div class="auto-test-hero-meta">
+                <span id="autoTestLastSummary">尚未运行</span>
+              </div>
+            </div>
+            <div class="auto-test-hero-action">
+              <button type="button" class="btn-mega btn-auto-test-run" id="btnRunManualAutoTest">一键自动化测试 →</button>
+              <p class="auto-test-run-hint">约 1–2 分钟 · 实时扫描 5 组件 · 不执行任何上线操作</p>
+            </div>
+          </div>
+
+          <details class="fold card auto-test-options">
+            <summary>
+              <span>高级选项</span>
+              <small>数据 diff 范围与 AI 比对说明</small>
+            </summary>
+            <label class="auto-test-check">
+              <input type="checkbox" id="autoTestIncludeRecent" checked />
+              额外合并最近 20 条组件上线记录的数据 diff
+            </label>
+            <label for="autoTestNotes">上线预期说明（可选）</label>
+            <textarea id="autoTestNotes" class="sql-editor" rows="4" placeholder="例：应新增 osh_platform_test 表、osh.platform.test.event topic、Redis key osh:platform:test:key1…"></textarea>
+          </details>
+
+          <div class="card auto-test-report-card" id="autoTestReportPanel">
+            <div class="auto-test-head">
+              <strong>测试报告</strong>
+              <span id="autoTestPageSummary">加载中…</span>
+            </div>
+            <div id="autoTestPageReport" class="auto-test-body">
+              <div class="empty">点击「一键自动化测试」开始，或等待组件批量上线后自动生成报告。</div>
+            </div>
+          </div>
+        </section>
+
         <!-- legacy alias: sql page merged into components -->
         <section class="page page-sql" id="pageSql" data-page="sql" hidden aria-hidden="true"></section>
 
@@ -860,6 +914,6 @@
   <input type="hidden" id="rev2" value="rev-c" />
   <input type="hidden" id="impact" value="前后端代码更新，仅部署绿环境" />
 
-  <script src="/app.js?v=20260629-green-verify"></script>
+  <script src="/app.js?v=20260629-probe-fix"></script>
 </body>
 </html>

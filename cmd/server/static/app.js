@@ -371,6 +371,7 @@
     deploy: 'green',
     'war-room': 'green',
     components: 'green',
+    'auto-test': 'green',
     sql: 'green',
     'sync-green': 'green',
     traffic: null,
@@ -388,6 +389,10 @@
     components: {
       title: '绿环境组件上线',
       subtitle: 'MySQL / Redis / Nacos / ES / Kafka · 快照 · 增量 · 回滚',
+    },
+    'auto-test': {
+      title: '自动化测试',
+      subtitle: '功能探测 · 数据 diff · AI 判定 · 不执行上线',
     },
     sql: {
       title: '绿环境组件上线',
@@ -529,6 +534,9 @@
     if (page === 'components') {
       renderComponentOpsTab();
       loadComponentOpsHistory();
+    }
+    if (page === 'auto-test') {
+      loadAutoTestReport();
     }
     if (page === 'users') {
       loadAdminUsers();
@@ -1806,8 +1814,20 @@
     el.innerHTML = [
       ...executions.map((e) => `
         <div class="report-card"><strong>${escapeHtml(e.slot)} · ${escapeHtml(e.component)}</strong><span>${escapeHtml(e.status)} · ${escapeHtml(e.action)}</span><span>${escapeHtml(e.error || e.output || '已记录')}</span>${e.item_id ? `<div class="report-actions"><button type="button" class="mini-danger" data-rollback-item="${escapeHtml(e.item_id)}" data-rollback-slot="${escapeHtml(e.slot || 'green')}">回滚${escapeHtml(e.slot || 'green')}</button></div>` : ''}</div>`),
-      ...reports.map((r) => `
-        <div class="report-card"><strong>测试 ${escapeHtml(r.slot)} · ${escapeHtml(r.component)}</strong><span>${r.passed ? '通过' : '失败'}</span><span>${escapeHtml(r.ai_verdict || '')}</span></div>`),
+      ...reports.map((r) => {
+        const mini = renderAutoTestReportHTML({
+          functional_json: r.functional_json,
+          data_diff_json: r.data_diff_json,
+          ai_verdict: r.ai_verdict,
+          passed: r.passed,
+        });
+        return `
+        <div class="report-card report-card-wide">
+          <strong>组件测试 ${escapeHtml(r.slot)} · ${escapeHtml(r.component)}</strong>
+          <span>${r.passed ? '通过' : '失败'} · ${escapeHtml(r.ai_verdict || '')}</span>
+          <div class="auto-test-body compact">${mini}</div>
+        </div>`;
+      }),
       ...conflicts.map((c) => `
         <div class="report-card"><strong>冲突通知 · ${escapeHtml(c.owner)}</strong><span>${escapeHtml(c.file_path)}</span><span>${escapeHtml(c.status)} ${escapeHtml(c.email || '')}</span></div>`),
     ].join('');
@@ -1930,6 +1950,7 @@
       const deploy = deployStep(rel);
       const auto = autoTestStep(rel);
       const testWarn = auto?.status === 'failed' || rel?.status === 'failed';
+      loadDeployAutoTestReport(rel?.id);
       if (resetBtn) resetBtn.textContent = '再部署一遍 →';
       $('stepBadge').textContent = '完成';
       $('actionTitle').textContent = testWarn ? '绿环境已部署（测试有警告）' : '部署完成';
@@ -2289,6 +2310,125 @@ echo "es platform smoke ok"`,
     });
   }
 
+  function parseJSONSafe(raw, fallback) {
+    if (!raw) return fallback;
+    try {
+      return typeof raw === 'string' ? JSON.parse(raw) : raw;
+    } catch {
+      return fallback;
+    }
+  }
+
+  function renderAutoTestReportHTML(report) {
+    if (!report) return '<div class="empty">暂无自动化测试报告</div>';
+    const funcData = parseJSONSafe(report.functional_json, { cases: parseJSONSafe(report.functional_json, []) });
+    const funcCases = Array.isArray(funcData) ? funcData : (funcData.cases || []);
+    const diffData = parseJSONSafe(report.data_diff_json, {});
+    const changeRows = diffData?.data_changes?.rows
+      || (diffData.component_diffs || []).flatMap((d) => {
+        const comp = d.component || d.kind || 'unknown';
+        const rows = [];
+        (d.added || []).forEach((n) => rows.push({ component: comp, change_type: 'added', name: n }));
+        (d.removed || []).forEach((n) => rows.push({ component: comp, change_type: 'removed', name: n }));
+        (d.modified || []).forEach((n) => rows.push({ component: comp, change_type: 'modified', name: n }));
+        return rows;
+      });
+    const summary = diffData?.data_changes?.summary || diffData?.summary || {};
+    const verdict = report.ai_verdict || '—';
+    const passed = !!report.passed;
+    const funcRows = funcCases.map((c) => `
+      <tr class="${c.passed ? 'ok' : 'bad'}">
+        <td>${escapeHtml(c.name || c.target || '—')}</td>
+        <td>${escapeHtml(c.target || '—')}</td>
+        <td>${c.passed ? '通过' : '失败'}</td>
+        <td><code>${escapeHtml((c.detail || '').slice(0, 160))}</code></td>
+      </tr>`).join('');
+    const dataRows = (changeRows || []).map((r) => `
+      <tr>
+        <td>${escapeHtml(r.component || '—')}</td>
+        <td>${escapeHtml(r.change_type || '—')}</td>
+        <td><code>${escapeHtml(String(r.name || ''))}</code></td>
+      </tr>`).join('');
+    return `
+      <div class="auto-test-verdict ${passed ? 'pass' : 'fail'}">
+        <strong>${passed ? '总体通过' : '存在问题'}</strong>
+        <span>${escapeHtml(verdict)}</span>
+      </div>
+      <h4 class="auto-test-section-title">5.1 功能测试</h4>
+      <table class="auto-test-table">
+        <thead><tr><th>探测项</th><th>目标</th><th>结果</th><th>详情</th></tr></thead>
+        <tbody>${funcRows || '<tr><td colspan="4">无数据</td></tr>'}</tbody>
+      </table>
+      <h4 class="auto-test-section-title">5.2 数据量 / 变更对比</h4>
+      <p class="auto-test-summary-line">新增 ${summary.added_count ?? '—'} · 删除 ${summary.removed_count ?? '—'} · 修改 ${summary.modified_count ?? '—'}</p>
+      <table class="auto-test-table">
+        <thead><tr><th>组件</th><th>变更类型</th><th>对象</th></tr></thead>
+        <tbody>${dataRows || '<tr><td colspan="3">未检测到结构化 diff（可能 analyzer 离线或未执行组件 diff-report）</td></tr>'}</tbody>
+      </table>`;
+  }
+
+  function showAutoTestReport(report) {
+    const body = $('autoTestPageReport');
+    const summary = $('autoTestPageSummary');
+    const last = $('autoTestLastSummary');
+    if (!body) return;
+    if (!report) {
+      if (summary) summary.textContent = '暂无报告';
+      if (last) last.textContent = '尚未运行';
+      body.innerHTML = '<div class="empty">点击「一键自动化测试」开始，或完成组件批量上线后查看报告。</div>';
+      return;
+    }
+    const triggerLabel = report.trigger === 'manual' ? '手动' : '批量上线后';
+    const statusText = `${triggerLabel} · ${report.passed ? '通过' : '未通过'}`;
+    if (summary) {
+      summary.textContent = `${statusText} · ${(report.ai_verdict || '').slice(0, 100)}`;
+    }
+    if (last) {
+      last.textContent = report.passed
+        ? `上次：${statusText} — ${new Date(report.created_at).toLocaleString()}`
+        : `上次：${statusText} — 请查看下方报告`;
+    }
+    body.innerHTML = renderAutoTestReportHTML(report);
+  }
+
+  async function runManualAutoTest() {
+    if (state.busy) return;
+    state.busy = true;
+    $('loading')?.classList.add('show');
+    const btn = $('btnRunManualAutoTest');
+    if (btn) btn.disabled = true;
+    try {
+      const notes = ($('autoTestNotes')?.value || '').trim();
+      const report = await api('/api/components/auto-test/run', {
+        method: 'POST',
+        body: JSON.stringify({
+          slot: 'green',
+          include_recent_ops: !!$('autoTestIncludeRecent')?.checked,
+          recent_limit: 20,
+          notes,
+          actor: state.user?.username || 'ops',
+        }),
+      });
+      showAutoTestReport(report);
+      toast(report.passed ? '自动化测试通过' : '自动化测试完成（存在问题）', report.passed ? 'success' : 'error');
+    } catch (err) {
+      toast(err.message || '自动化测试失败', 'error');
+    } finally {
+      state.busy = false;
+      if (btn) btn.disabled = false;
+      $('loading')?.classList.remove('show');
+    }
+  }
+
+  async function loadAutoTestReport() {
+    try {
+      const report = await api('/api/components/auto-test/latest');
+      showAutoTestReport(report);
+    } catch {
+      showAutoTestReport(null);
+    }
+  }
+
   async function execComponentBatch() {
     if (!state.componentOpsQueue.length) {
       toast('队列为空，请先加入组件', 'error');
@@ -2311,6 +2451,10 @@ echo "es platform smoke ok"`,
       const partial = res.failed || (res.fail_count || 0) > 0;
       resultEl.className = `sql-result ${partial ? 'warn' : 'ok'}`;
       resultEl.textContent = formatBatchResult(res);
+      if (res.auto_test) {
+        showAutoTestReport(res.auto_test);
+        toast('自动化测试报告已更新，可在「自动化测试」页查看');
+      }
       toast(partial
         ? `逐个执行完成：${res.success_count || 0} 成功，${res.fail_count || 0} 失败`
         : `全部 ${res.success_count || state.componentOpsQueue.length} 项执行成功`);
@@ -2339,6 +2483,11 @@ echo "es platform smoke ok"`,
       const bad = res?.fail_count ?? 0;
       lines.push(`逐个执行：${ok} 成功，${bad} 失败`);
       if (res?.message) lines.push(res.message);
+      if (res?.auto_test) {
+        lines.push('', '—— 自动化测试 ——');
+        lines.push(`功能+数据判定：${res.auto_test.passed ? '通过' : '未通过'}`);
+        if (res.auto_test.ai_verdict) lines.push(res.auto_test.ai_verdict);
+      }
     }
     (res?.results || []).forEach((r, i) => {
       const mark = r.status === 'success' ? '✓' : '✗';
@@ -2865,6 +3014,23 @@ echo "es platform smoke ok"`,
     });
   }
 
+  async function loadDeployAutoTestReport(releaseId) {
+    const fold = $('autoTestFold');
+    const body = $('deployAutoTestReport');
+    if (!fold || !body || !releaseId) return;
+    try {
+      const report = await api(`/api/releases/${releaseId}/test-report`);
+      if (!report) {
+        fold.hidden = true;
+        return;
+      }
+      fold.hidden = false;
+      body.innerHTML = renderAutoTestReportHTML(report);
+    } catch {
+      fold.hidden = true;
+    }
+  }
+
   async function select(id) {
     state.current = await api(`/api/releases/${id}`);
     renderUI();
@@ -3224,6 +3390,9 @@ echo "es platform smoke ok"`,
     });
     $('btnExecComponentBatch')?.addEventListener('click', () => {
       execComponentBatch().catch((e) => toast(e.message || String(e), 'error'));
+    });
+    $('btnRunManualAutoTest')?.addEventListener('click', () => {
+      runManualAutoTest().catch((e) => toast(e.message || String(e), 'error'));
     });
     $('btnExecRedis')?.addEventListener('click', () => execRedisOps().catch((e) => toast(e.message, 'error')));
     $('btnExecNacos')?.addEventListener('click', () => execNacosOps().catch((e) => toast(e.message, 'error')));

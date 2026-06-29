@@ -142,6 +142,21 @@ type TestReport struct {
 	CreatedAt  time.Time `json:"created_at"`
 }
 
+// BatchAutoTestReport is post-component-batch functional + data diff + AI verdict.
+type BatchAutoTestReport struct {
+	ID          string    `json:"id"`
+	BatchID     string    `json:"batch_id"`
+	Slot        string    `json:"slot"`
+	Trigger     string    `json:"trigger,omitempty"` // batch | manual
+	Functional  string    `json:"functional_json"`
+	DataDiff    string    `json:"data_diff_json"`
+	AIVerdict   string    `json:"ai_verdict"`
+	AIPassed    bool      `json:"ai_passed"`
+	Passed      bool      `json:"passed"`
+	Actor       string    `json:"actor,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
 type SwitchEvent struct {
 	ID        string    `json:"id"`
 	ReleaseID string    `json:"release_id"`

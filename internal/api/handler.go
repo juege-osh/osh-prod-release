@@ -151,10 +151,14 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/migrations/{id}", h.getMigrationSQL)
 	mux.HandleFunc("POST /api/migrations/{id}/execute", h.executeMigration)
 	mux.HandleFunc("POST /api/sql/execute", h.executeSQL)
+	mux.HandleFunc("GET /api/components/auto-test/latest", h.componentAutoTestLatest)
+	mux.HandleFunc("GET /api/components/auto-test/batches/{batchId}", h.componentAutoTestByBatch)
+	mux.HandleFunc("POST /api/components/auto-test/run", h.componentAutoTestRun)
 	mux.HandleFunc("POST /api/components/batch/apply", h.componentBatchApply)
 	mux.HandleFunc("POST /api/components/{kind}/apply", h.componentApply)
 	mux.HandleFunc("POST /api/components/{kind}/rollback", h.componentRollback)
 	mux.HandleFunc("GET /api/components/{kind}/history", h.componentHistory)
+	mux.HandleFunc("GET /api/releases/{id}/test-report", h.releaseTestReport)
 	mux.HandleFunc("GET /api/admin/users", h.listUsers)
 	mux.HandleFunc("POST /api/admin/users", h.createUserAdmin)
 	mux.HandleFunc("PATCH /api/admin/users/{username}", h.updateUserAdmin)
@@ -680,6 +684,66 @@ func (h *Handler) componentHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, list)
+}
+
+func (h *Handler) componentAutoTestLatest(w http.ResponseWriter, r *http.Request) {
+	if !h.auth(w, r) {
+		return
+	}
+	report, err := h.release.Store().GetLatestBatchAutoTestReport(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusOK, nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, report)
+}
+
+func (h *Handler) componentAutoTestByBatch(w http.ResponseWriter, r *http.Request) {
+	if !h.auth(w, r) {
+		return
+	}
+	report, err := h.release.Store().GetBatchAutoTestReport(r.Context(), r.PathValue("batchId"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, report)
+}
+
+func (h *Handler) componentAutoTestRun(w http.ResponseWriter, r *http.Request) {
+	user, ok := h.requireUser(w, r)
+	if !ok {
+		return
+	}
+	var req componentops.ManualAutoTestRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		return
+	}
+	if req.Actor == "" {
+		req.Actor = user.Username
+	}
+	if req.Slot == "" {
+		req.Slot = "green"
+	}
+	report, err := h.compOps.RunManualAutoTest(r.Context(), req)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, report)
+}
+
+func (h *Handler) releaseTestReport(w http.ResponseWriter, r *http.Request) {
+	if !h.auth(w, r) {
+		return
+	}
+	report, err := h.release.Store().GetLatestTestReport(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeJSON(w, http.StatusOK, nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, report)
 }
 
 func (h *Handler) listUsers(w http.ResponseWriter, r *http.Request) {
